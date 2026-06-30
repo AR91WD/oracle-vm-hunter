@@ -97,11 +97,17 @@ jobs:
               if echo "$result" | grep -q '"lifecycleState"'; then
                 state=$(echo "$result" | grep -o '"lifecycleState"[^,]*' | head -1 | cut -d'"' -f4)
                 if [ "$state" = "PROVISIONING" ] || [ "$state" = "RUNNING" ]; then
-                  echo "VM CREATED! ($state)"
+                  vm_id=$(echo "$result" | grep -o '"id":"ocid1.instance[^"]*"' | head -1 | cut -d'"' -f4)
+                  echo "VM CREATED! ($state) OCID: $vm_id"
                   echo "$result" | python3 -m json.tool 2>/dev/null || echo "$result"
-                  echo "::notice::VM CREATED in $ad_short with state $state"
-                  tg_notify "✅ VM CREATED in ${ad_short} (${state}) — check Oracle Console"
-                  gh_issue "VM CREATED in ${ad_short}" "Oracle A1.Flex VM provisioned at $(date -u). State: ${state}. AD: ${ad_short}. Check Oracle Console: https://cloud.oracle.com/compute/instances"
+                  echo "::notice::VM CREATED in $ad_short with state $state OCID $vm_id"
+                  tg_notify "✅ VM CREATED — AD: ${ad_short}, State: ${state}%0AOCID: ${vm_id}%0AConsole: https://cloud.oracle.com/compute/instances"
+                  gh_issue "VM CREATED in ${ad_short}" "Oracle A1.Flex VM provisioned at $(date -u).%0A%0A**State:** ${state}%0A**AD:** ${ad_short}%0A**OCID:** \`${vm_id}\`%0A%0AConsole: https://cloud.oracle.com/compute/instances%0A%0AStop further runs: disable workflow at https://github.com/${GH_REPO}/actions/workflows/retry-vm.yml"
+                  # Disable workflow so subsequent cron runs don't try again
+                  curl -s -X PUT \
+                    -H "Authorization: token $GH_TOKEN" \
+                    -H "Accept: application/vnd.github+json" \
+                    "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/disable" > /dev/null 2>&1
                   rm -f /tmp/oci-key.pem
                   exit 0
                 fi
