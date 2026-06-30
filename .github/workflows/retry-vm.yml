@@ -4,6 +4,10 @@ on:
     - cron: '*/5 * * * *'
   workflow_dispatch:
 
+concurrency:
+  group: vm-hunter
+  cancel-in-progress: false
+
 jobs:
   hunt:
     runs-on: ubuntu-latest
@@ -104,7 +108,7 @@ jobs:
                   echo "VM CREATED! ($state) OCID: $vm_id"
                   echo "$result" | python3 -m json.tool 2>/dev/null || echo "$result"
                   echo "::notice::VM CREATED in $ad_short with state $state OCID $vm_id"
-                  tg_notify "✅ VM CREATED — AD: ${ad_short}, State: ${state}%0AOCID: ${vm_id}%0AConsole: https://cloud.oracle.com/compute/instances"
+                  tg_notify "🎉 ПОЗДРАВЛЯЮ! У тебя есть виртуальный сервер!%0A%0AAD: ${ad_short}%0AState: ${state}%0AOCID: ${vm_id}%0A%0AOracle Console: https://cloud.oracle.com/compute/instances"
                   gh_issue "VM CREATED in ${ad_short}" "Oracle A1.Flex VM provisioned at $(date -u).%0A%0A**State:** ${state}%0A**AD:** ${ad_short}%0A**OCID:** \`${vm_id}\`%0A%0AConsole: https://cloud.oracle.com/compute/instances%0A%0AStop further runs: disable workflow at https://github.com/${GH_REPO}/actions/workflows/retry-vm.yml"
                   # Disable workflow so subsequent cron runs don't try again
                   curl -s -X PUT \
