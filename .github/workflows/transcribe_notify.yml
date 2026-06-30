@@ -1,6 +1,9 @@
 name: Transcription and Telegram Notification
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
