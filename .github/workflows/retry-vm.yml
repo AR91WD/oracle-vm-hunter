@@ -10,6 +10,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       issues: write
+      actions: write
     steps:
       - name: Try all ADs in tight loop
         env:
@@ -139,3 +140,17 @@ jobs:
 
           rm -f /tmp/oci-key.pem
           echo "Run finished: ${attempt} attempts/AD, ${rate_limited} rate-limits"
+
+      - name: Self-dispatch next run (cron backup)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Trigger next run in ~30 sec to keep continuous coverage even if cron lags
+          sleep 30
+          curl -s -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/dispatches" \
+            -d '{"ref":"main"}' || true
