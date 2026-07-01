@@ -23,7 +23,8 @@ jobs:
           - "gukW:EU-FRANKFURT-1-AD-2"
           - "gukW:EU-FRANKFURT-1-AD-3"
     steps:
-      - name: Hunt single AD on dedicated runner IP
+      - uses: actions/checkout@v4
+      - name: Progressive hunt on dedicated runner IP
         shell: bash {0}
         env:
           OCI_USER: ${{ secrets.OCI_USER }}
@@ -39,160 +40,18 @@ jobs:
           SUBNET: "ocid1.subnet.oc1.eu-frankfurt-1.aaaaaaaakgx7op4hgzjmo2afhzkhhmduhyydwnenkdc5zy63cxysh3fab5ba"
           IMAGE: "ocid1.image.oc1.eu-frankfurt-1.aaaaaaaa4xniimqv2um47gmhf235bwj2wm45roe55dxxwmhfzqtrm6a3ggeq"
           OCI_REGION: "eu-frankfurt-1"
+          TARGET_OCPU: "4"
+          DURATION: "230"
+          SOURCE: "GH"
         run: |
           set +e
           echo "$OCI_KEY" > /tmp/oci-key.pem
           chmod 600 /tmp/oci-key.pem
-
-          API_HOST="iaas.${OCI_REGION}.oraclecloud.com"
-          API_PATH="/20160918/instances"
-          API_URL="https://${API_HOST}${API_PATH}"
-          COMPARTMENT="$OCI_TENANCY"
-          ad_short="${AD##*-}"
-
-          oci_sign_and_post() {
-            local body="$1"
-            local now
-            now=$(date -u '+%a, %d %b %Y %H:%M:%S GMT')
-            local body_sha256
-            body_sha256=$(printf '%s' "$body" | openssl dgst -sha256 -binary | openssl enc -base64)
-            local content_length=${#body}
-            local content_type="application/json"
-            local signing_string="(request-target): post ${API_PATH}
-          date: ${now}
-          host: ${API_HOST}
-          content-length: ${content_length}
-          content-type: ${content_type}
-          x-content-sha256: ${body_sha256}"
-            local signature
-            signature=$(printf '%s' "$signing_string" | openssl dgst -sha256 -sign /tmp/oci-key.pem | openssl enc -base64 | tr -d '\n')
-            local key_id="${OCI_TENANCY}/${OCI_USER}/${OCI_FINGERPRINT}"
-            local auth_header="Signature version=\"1\",keyId=\"${key_id}\",algorithm=\"rsa-sha256\",headers=\"(request-target) date host content-length content-type x-content-sha256\",signature=\"${signature}\""
-            curl -s --max-time 15 -X POST "$API_URL" \
-              -H "date: ${now}" \
-              -H "host: ${API_HOST}" \
-              -H "content-type: ${content_type}" \
-              -H "content-length: ${content_length}" \
-              -H "x-content-sha256: ${body_sha256}" \
-              -H "authorization: ${auth_header}" \
-              -d "$body" 2>&1
-          }
-
-          tg_notify() {
-            [ -z "$TG_CHAT_ID" ] && return
-            local msg="$1" i resp
-            for i in 1 2 3; do
-              resp=$(curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
-                -d "chat_id=${TG_CHAT_ID}" -d "text=${msg}" 2>&1)
-              echo "$resp" | grep -q '"ok":true' && return 0
-              sleep 3
-            done
-            return 1
-          }
-
-          gh_issue() {
-            local title body
-            title=$(printf '%s' "$1" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
-            body=$(printf '%s' "$2" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
-            curl -s --max-time 15 -X POST \
-              -H "Authorization: token $GH_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/$GH_REPO/issues" \
-              -d "{\"title\":${title},\"body\":${body}}" > /dev/null 2>&1
-          }
-
-          # Stagger matrix workers so 3 runners don't hit Oracle in the same instant
-          case "$ad_short" in
-            1) sleep 0 ;;
-            2) sleep 3 ;;
-            3) sleep 6 ;;
-          esac
-
-          body=$(printf '{"compartmentId":"%s","availabilityDomain":"%s","displayName":"ai-hub","shape":"VM.Standard.A1.Flex","shapeConfig":{"ocpus":4,"memoryInGBs":24},"imageId":"%s","createVnicDetails":{"subnetId":"%s","assignPublicIp":true},"sourceDetails":{"sourceType":"image","imageId":"%s","bootVolumeSizeInGBs":100},"metadata":{"ssh_authorized_keys":"%s"}}' \
-            "$COMPARTMENT" "$AD" "$IMAGE" "$SUBNET" "$IMAGE" "$SSH_KEY")
-
-          END=$(($(date +%s) + 240))
-          attempt=0
-          sleep_between=8
-          ok_streak=0
-          rate_limited=0
-          auth_fail=0
-          unknown=0
-
-          while [ $(date +%s) -lt $END ]; do
-            attempt=$((attempt + 1))
-            echo -n "[$(date -u '+%H:%M:%S')] ${ad_short} #${attempt} (${sleep_between}s): "
-
-            result=$(oci_sign_and_post "$body")
-
-            # SUCCESS
-            if echo "$result" | grep -q '"lifecycleState"'; then
-              state=$(echo "$result" | grep -o '"lifecycleState"[^,]*' | head -1 | cut -d'"' -f4)
-              if [ "$state" = "PROVISIONING" ] || [ "$state" = "RUNNING" ]; then
-                vm_id=$(echo "$result" | grep -o '"id":"ocid1.instance[^"]*"' | head -1 | cut -d'"' -f4)
-                echo "VM CREATED! ($state) $vm_id"
-                echo "::notice::VM CREATED $ad_short $vm_id"
-                tg_notify "🎉 ПОЗДРАВЛЯЮ! У тебя есть виртуальный сервер!%0A%0AAD: ${ad_short}%0AState: ${state}%0AOCID: ${vm_id}%0A%0AConsole: https://cloud.oracle.com/compute/instances"
-                gh_issue "VM CREATED in ${ad_short}" "Oracle A1.Flex VM provisioned $(date -u). State ${state}. AD ${ad_short}. OCID ${vm_id}. Console: https://cloud.oracle.com/compute/instances"
-                # Disable whole workflow so no further generations spawn
-                curl -s -X PUT -H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-                  "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/disable" > /dev/null 2>&1
-                rm -f /tmp/oci-key.pem
-                exit 0
-              fi
-            fi
-
-            # RATE LIMIT
-            if echo "$result" | grep -q "TooManyRequests"; then
-              ok_streak=0
-              rate_limited=$((rate_limited + 1))
-              [ "$sleep_between" -lt 15 ] && sleep_between=$((sleep_between + 1))
-              echo "rate-limited (sleep→${sleep_between}s)"
-              if [ "$rate_limited" -ge 12 ]; then
-                echo "::warning::circuit open ${ad_short}, cooling 120s"
-                sleep 120
-                rate_limited=0
-              else
-                sleep 60
-              fi
-              continue
-            fi
-
-            # AUTH FAIL — degrade, don't die; alert but keep repo/workflow alive
-            if echo "$result" | grep -qE "NotAuthenticated|Authentication failed|InvalidSignature|Failed to verify"; then
-              auth_fail=$((auth_fail + 1))
-              echo "AUTH FAIL (${auth_fail})"
-              if [ "$auth_fail" -eq 3 ]; then
-                tg_notify "🚨 OCI ключ не проходит авторизацию (${ad_short}). Нужно обновить secret OCI_KEY. Система продолжает стучать на случай если это временный сбой Oracle."
-              fi
-              sleep 20
-              continue
-            fi
-
-            # UNKNOWN — possible API change, alert once, keep trying old format
-            if ! echo "$result" | grep -qE "Out of host capacity|InternalError|LimitExceeded|QuotaExceeded|OutOfCapacity"; then
-              unknown=$((unknown + 1))
-              short=$(echo "$result" | head -c 150 | tr '\n' ' ')
-              echo "UNKNOWN: $short"
-              if [ "$unknown" -eq 3 ]; then
-                tg_notify "⚠️ Странный ответ Oracle API (${ad_short}) — возможно изменение API:%0A${short}%0A%0AСистема продолжает стучать старым методом."
-              fi
-              sleep "$sleep_between"
-              continue
-            fi
-
-            auth_fail=0; unknown=0; rate_limited=0
-            msg=$(echo "$result" | grep -o '"message"[^,]*' | head -1 | cut -d'"' -f4 | cut -c1-50)
-            echo "${msg:-no slot}"
-            ok_streak=$((ok_streak + 1))
-            if [ "$ok_streak" -ge 12 ] && [ "$sleep_between" -gt 7 ]; then
-              sleep_between=$((sleep_between - 1)); ok_streak=0
-            fi
-            sleep "$sleep_between"
-          done
-
+          export KEY_FILE=/tmp/oci-key.pem
+          # Stagger the 3 matrix runners so they don't hit Oracle in the same instant
+          case "${AD##*-}" in 1) sleep 0;; 2) sleep 4;; 3) sleep 8;; esac
+          bash hunt.sh
           rm -f /tmp/oci-key.pem
-          echo "${ad_short} done: ${attempt} attempts"
 
   relaunch:
     needs: hunt
@@ -211,16 +70,13 @@ jobs:
           HUNT_RESULT: ${{ needs.hunt.result }}
         run: |
           set +e
-          # Verify workflow still enabled (success path disables it). If disabled, stop chain.
           state=$(curl -s -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml" \
             | grep -o '"state":"[^"]*"' | head -1 | cut -d'"' -f4)
           if [ "$state" = "disabled_manually" ] || [ "$state" = "disabled_inactivity" ]; then
-            echo "Workflow disabled ($state) — VM likely caught, not relaunching."
+            echo "Workflow disabled ($state) — target reached, not relaunching."
             exit 0
           fi
-
-          # Chain next run — this is the fast loop; cron */5 is the independent backstop.
           sleep 15
           curl -s -X POST -H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/dispatches" \
