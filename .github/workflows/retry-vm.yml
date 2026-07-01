@@ -15,8 +15,15 @@ jobs:
     permissions:
       issues: write
       actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        ad:
+          - "gukW:EU-FRANKFURT-1-AD-1"
+          - "gukW:EU-FRANKFURT-1-AD-2"
+          - "gukW:EU-FRANKFURT-1-AD-3"
     steps:
-      - name: Try all ADs in tight loop
+      - name: Hunt single AD on dedicated runner IP
         shell: bash {0}
         env:
           OCI_USER: ${{ secrets.OCI_USER }}
@@ -28,6 +35,7 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          AD: ${{ matrix.ad }}
           SUBNET: "ocid1.subnet.oc1.eu-frankfurt-1.aaaaaaaakgx7op4hgzjmo2afhzkhhmduhyydwnenkdc5zy63cxysh3fab5ba"
           IMAGE: "ocid1.image.oc1.eu-frankfurt-1.aaaaaaaa4xniimqv2um47gmhf235bwj2wm45roe55dxxwmhfzqtrm6a3ggeq"
           OCI_REGION: "eu-frankfurt-1"
@@ -40,7 +48,7 @@ jobs:
           API_PATH="/20160918/instances"
           API_URL="https://${API_HOST}${API_PATH}"
           COMPARTMENT="$OCI_TENANCY"
-          ADS=("gukW:EU-FRANKFURT-1-AD-1" "gukW:EU-FRANKFURT-1-AD-2" "gukW:EU-FRANKFURT-1-AD-3")
+          ad_short="${AD##*-}"
 
           oci_sign_and_post() {
             local body="$1"
@@ -70,27 +78,22 @@ jobs:
               -d "$body" 2>&1
           }
 
-          # Retry TG send up to 3 times on failure
           tg_notify() {
             [ -z "$TG_CHAT_ID" ] && return
-            local msg="$1"
-            local i
+            local msg="$1" i resp
             for i in 1 2 3; do
-              local resp
               resp=$(curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
                 -d "chat_id=${TG_CHAT_ID}" -d "text=${msg}" 2>&1)
-              if echo "$resp" | grep -q '"ok":true'; then
-                return 0
-              fi
+              echo "$resp" | grep -q '"ok":true' && return 0
               sleep 3
             done
-            echo "::warning::Telegram send failed after 3 retries"
             return 1
           }
 
           gh_issue() {
-            local title=$(printf '%s' "$1" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
-            local body=$(printf '%s' "$2" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
+            local title body
+            title=$(printf '%s' "$1" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
+            body=$(printf '%s' "$2" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
             curl -s --max-time 15 -X POST \
               -H "Authorization: token $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
@@ -98,144 +101,128 @@ jobs:
               -d "{\"title\":${title},\"body\":${body}}" > /dev/null 2>&1
           }
 
-          # Trigger heartbeat if last one was >2h ago (safer than cron)
-          maybe_heartbeat() {
-            local last
-            last=$(curl -s -H "Authorization: token $GH_TOKEN" \
-              "https://api.github.com/repos/$GH_REPO/actions/workflows/heartbeat.yml/runs?per_page=1&status=success" \
-              | grep -o '"created_at":"[^"]*"' | head -1 | cut -d'"' -f4)
-            [ -z "$last" ] && return
-            local last_epoch=$(date -d "$last" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last" +%s 2>/dev/null || echo 0)
-            local now_epoch=$(date +%s)
-            local diff=$((now_epoch - last_epoch))
-            if [ "$diff" -gt 7200 ]; then
-              echo "Heartbeat overdue (${diff}s), triggering"
-              curl -s -X POST \
-                -H "Authorization: token $GH_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/$GH_REPO/actions/workflows/heartbeat.yml/dispatches" \
-                -d '{"ref":"main"}' > /dev/null 2>&1
-            fi
-          }
+          # Stagger matrix workers so 3 runners don't hit Oracle in the same instant
+          case "$ad_short" in
+            1) sleep 0 ;;
+            2) sleep 3 ;;
+            3) sleep 6 ;;
+          esac
 
-          maybe_heartbeat
+          body=$(printf '{"compartmentId":"%s","availabilityDomain":"%s","displayName":"ai-hub","shape":"VM.Standard.A1.Flex","shapeConfig":{"ocpus":4,"memoryInGBs":24},"imageId":"%s","createVnicDetails":{"subnetId":"%s","assignPublicIp":true},"sourceDetails":{"sourceType":"image","imageId":"%s","bootVolumeSizeInGBs":100},"metadata":{"ssh_authorized_keys":"%s"}}' \
+            "$COMPARTMENT" "$AD" "$IMAGE" "$SUBNET" "$IMAGE" "$SSH_KEY")
 
-          # Run for ~4 minutes (workflow timeout 5 min, leave buffer)
           END=$(($(date +%s) + 240))
           attempt=0
-          rate_limited=0
-          sleep_between=6
+          sleep_between=8
           ok_streak=0
-          auth_fail_count=0
-          circuit_open=0
+          rate_limited=0
+          auth_fail=0
+          unknown=0
 
           while [ $(date +%s) -lt $END ]; do
             attempt=$((attempt + 1))
-            for ad in "${ADS[@]}"; do
-              ad_short="${ad##*-}"
-              echo -n "[$(date -u '+%H:%M:%S')] #${attempt} ${ad_short} (${sleep_between}s): "
+            echo -n "[$(date -u '+%H:%M:%S')] ${ad_short} #${attempt} (${sleep_between}s): "
 
-              body=$(printf '{"compartmentId":"%s","availabilityDomain":"%s","displayName":"ai-hub","shape":"VM.Standard.A1.Flex","shapeConfig":{"ocpus":4,"memoryInGBs":24},"imageId":"%s","createVnicDetails":{"subnetId":"%s","assignPublicIp":true},"sourceDetails":{"sourceType":"image","imageId":"%s","bootVolumeSizeInGBs":100},"metadata":{"ssh_authorized_keys":"%s"}}' \
-                "$COMPARTMENT" "$ad" "$IMAGE" "$SUBNET" "$IMAGE" "$SSH_KEY")
+            result=$(oci_sign_and_post "$body")
 
-              result=$(oci_sign_and_post "$body")
-
-              # SUCCESS
-              if echo "$result" | grep -q '"lifecycleState"'; then
-                state=$(echo "$result" | grep -o '"lifecycleState"[^,]*' | head -1 | cut -d'"' -f4)
-                if [ "$state" = "PROVISIONING" ] || [ "$state" = "RUNNING" ]; then
-                  vm_id=$(echo "$result" | grep -o '"id":"ocid1.instance[^"]*"' | head -1 | cut -d'"' -f4)
-                  echo "VM CREATED! ($state) OCID: $vm_id"
-                  echo "$result" | python3 -m json.tool 2>/dev/null || echo "$result"
-                  echo "::notice::VM CREATED in $ad_short OCID $vm_id"
-                  tg_notify "🎉 ПОЗДРАВЛЯЮ! У тебя есть виртуальный сервер!%0A%0AAD: ${ad_short}%0AState: ${state}%0AOCID: ${vm_id}%0A%0AOracle Console: https://cloud.oracle.com/compute/instances"
-                  gh_issue "VM CREATED in ${ad_short}" "Oracle A1.Flex VM provisioned at $(date -u). State: ${state}. AD: ${ad_short}. OCID: ${vm_id}. Console: https://cloud.oracle.com/compute/instances"
-                  curl -s -X PUT \
-                    -H "Authorization: token $GH_TOKEN" \
-                    -H "Accept: application/vnd.github+json" \
-                    "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/disable" > /dev/null 2>&1
-                  rm -f /tmp/oci-key.pem
-                  exit 0
-                fi
+            # SUCCESS
+            if echo "$result" | grep -q '"lifecycleState"'; then
+              state=$(echo "$result" | grep -o '"lifecycleState"[^,]*' | head -1 | cut -d'"' -f4)
+              if [ "$state" = "PROVISIONING" ] || [ "$state" = "RUNNING" ]; then
+                vm_id=$(echo "$result" | grep -o '"id":"ocid1.instance[^"]*"' | head -1 | cut -d'"' -f4)
+                echo "VM CREATED! ($state) $vm_id"
+                echo "::notice::VM CREATED $ad_short $vm_id"
+                tg_notify "🎉 ПОЗДРАВЛЯЮ! У тебя есть виртуальный сервер!%0A%0AAD: ${ad_short}%0AState: ${state}%0AOCID: ${vm_id}%0A%0AConsole: https://cloud.oracle.com/compute/instances"
+                gh_issue "VM CREATED in ${ad_short}" "Oracle A1.Flex VM provisioned $(date -u). State ${state}. AD ${ad_short}. OCID ${vm_id}. Console: https://cloud.oracle.com/compute/instances"
+                # Disable whole workflow so no further generations spawn
+                curl -s -X PUT -H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+                  "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/disable" > /dev/null 2>&1
+                rm -f /tmp/oci-key.pem
+                exit 0
               fi
+            fi
 
-              # RATE LIMIT
-              if echo "$result" | grep -q "TooManyRequests"; then
-                ok_streak=0
-                if [ "$sleep_between" -lt 12 ]; then
-                  sleep_between=$((sleep_between + 1))
-                fi
-                echo "rate-limited (90s pause, sleep→${sleep_between}s)"
-                rate_limited=$((rate_limited + 1))
-                # Circuit breaker: 15 rate-limits in run = 5 min cooldown
-                if [ "$rate_limited" -ge 15 ] && [ "$circuit_open" -eq 0 ]; then
-                  echo "::warning::Circuit breaker OPEN — ${rate_limited} rate-limits, cooling 300s"
-                  circuit_open=1
-                  sleep 300
-                else
-                  sleep 90
-                fi
-                break
+            # RATE LIMIT
+            if echo "$result" | grep -q "TooManyRequests"; then
+              ok_streak=0
+              rate_limited=$((rate_limited + 1))
+              [ "$sleep_between" -lt 15 ] && sleep_between=$((sleep_between + 1))
+              echo "rate-limited (sleep→${sleep_between}s)"
+              if [ "$rate_limited" -ge 12 ]; then
+                echo "::warning::circuit open ${ad_short}, cooling 120s"
+                sleep 120
+                rate_limited=0
+              else
+                sleep 60
               fi
+              continue
+            fi
 
-              # AUTH FAILURE detection
-              if echo "$result" | grep -qE "NotAuthenticated|Authentication failed|InvalidSignature"; then
-                auth_fail_count=$((auth_fail_count + 1))
-                echo "AUTH ERROR"
-                if [ "$auth_fail_count" -ge 3 ]; then
-                  echo "::error::OCI auth failing repeatedly — check OCI_KEY secret"
-                  tg_notify "🚨 ОШИБКА: OCI ключ не работает (${auth_fail_count} fails). Проверь secret OCI_KEY в GitHub. Слот не сможет быть пойман!"
-                  rm -f /tmp/oci-key.pem
-                  exit 1
-                fi
-                sleep 30
-                continue
+            # AUTH FAIL — degrade, don't die; alert but keep repo/workflow alive
+            if echo "$result" | grep -qE "NotAuthenticated|Authentication failed|InvalidSignature|Failed to verify"; then
+              auth_fail=$((auth_fail + 1))
+              echo "AUTH FAIL (${auth_fail})"
+              if [ "$auth_fail" -eq 3 ]; then
+                tg_notify "🚨 OCI ключ не проходит авторизацию (${ad_short}). Нужно обновить secret OCI_KEY. Система продолжает стучать на случай если это временный сбой Oracle."
               fi
+              sleep 20
+              continue
+            fi
 
-              # UNEXPECTED (not "Out of host capacity", not known error) → maybe API changed
-              if ! echo "$result" | grep -qE "Out of host capacity|InternalError|LimitExceeded|QuotaExceeded"; then
-                short=$(echo "$result" | head -c 200)
-                echo "UNKNOWN: $short"
-                if [ "$attempt" -eq 1 ]; then
-                  tg_notify "⚠️ Странный ответ Oracle API (может быть изменение API):%0A${short}"
-                fi
-                sleep "$sleep_between"
-                continue
-              fi
-
-              msg=$(echo "$result" | grep -o '"message"[^,]*' | head -1 | cut -d'"' -f4 | cut -c1-60)
-              echo "${msg:-no slot}"
-              ok_streak=$((ok_streak + 1))
-              if [ "$ok_streak" -ge 15 ] && [ "$sleep_between" -gt 5 ]; then
-                sleep_between=$((sleep_between - 1))
-                ok_streak=0
+            # UNKNOWN — possible API change, alert once, keep trying old format
+            if ! echo "$result" | grep -qE "Out of host capacity|InternalError|LimitExceeded|QuotaExceeded|OutOfCapacity"; then
+              unknown=$((unknown + 1))
+              short=$(echo "$result" | head -c 150 | tr '\n' ' ')
+              echo "UNKNOWN: $short"
+              if [ "$unknown" -eq 3 ]; then
+                tg_notify "⚠️ Странный ответ Oracle API (${ad_short}) — возможно изменение API:%0A${short}%0A%0AСистема продолжает стучать старым методом."
               fi
               sleep "$sleep_between"
-            done
+              continue
+            fi
+
+            auth_fail=0; unknown=0; rate_limited=0
+            msg=$(echo "$result" | grep -o '"message"[^,]*' | head -1 | cut -d'"' -f4 | cut -c1-50)
+            echo "${msg:-no slot}"
+            ok_streak=$((ok_streak + 1))
+            if [ "$ok_streak" -ge 12 ] && [ "$sleep_between" -gt 7 ]; then
+              sleep_between=$((sleep_between - 1)); ok_streak=0
+            fi
+            sleep "$sleep_between"
           done
 
           rm -f /tmp/oci-key.pem
-          echo "Run finished: ${attempt} attempts/AD, ${rate_limited} rate-limits"
+          echo "${ad_short} done: ${attempt} attempts"
 
-      - name: Self-dispatch next run (safety net)
-        if: always()
+  relaunch:
+    needs: hunt
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Chain next generation + failure alert
         shell: bash {0}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          HUNT_RESULT: ${{ needs.hunt.result }}
         run: |
-          # If step above failed, notify TG
-          if [ "${{ job.status }}" = "failure" ]; then
-            curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
-              -d "chat_id=${TG_CHAT_ID}" \
-              -d "text=🚨 Hunter workflow упал: run $(date -u '+%H:%M UTC'). Смотри логи: https://github.com/${GH_REPO}/actions" > /dev/null 2>&1 || true
+          set +e
+          # Verify workflow still enabled (success path disables it). If disabled, stop chain.
+          state=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml" \
+            | grep -o '"state":"[^"]*"' | head -1 | cut -d'"' -f4)
+          if [ "$state" = "disabled_manually" ] || [ "$state" = "disabled_inactivity" ]; then
+            echo "Workflow disabled ($state) — VM likely caught, not relaunching."
+            exit 0
           fi
-          # Chain next run — cron is unreliable on free tier
+
+          # Chain next run — this is the fast loop; cron */5 is the independent backstop.
           sleep 15
-          curl -s -X POST \
-            -H "Authorization: token $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
+          curl -s -X POST -H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/dispatches" \
-            -d '{"ref":"main"}' || true
+            -d '{"ref":"main"}' > /dev/null 2>&1
+          echo "Next generation dispatched (hunt result: $HUNT_RESULT)"
