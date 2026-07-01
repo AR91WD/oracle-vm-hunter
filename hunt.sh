@@ -156,13 +156,13 @@ while [ $(date +%s) -lt $END ]; do
 
   if [ "$MODE" = "create" ]; then
     [ "$size" -lt 1 ] && size=$TARGET_OCPU
-    echo -n "[$(date -u '+%H:%M:%S') $SOURCE] CREATE ${size}oc/${gb}gb ${ad_short}: "
+    echo -n "[$(date '+%H:%M:%S %Z') $SOURCE] CREATE ${size}oc/${gb}gb ${ad_short}: "
     result=$(sign_send post "$INST_PATH" "$(create_body "$ad" "$size" "$gb")")
   else
     # grow existing primary; only sizes strictly greater than current primary
     local_min=$((POC + 1))
     [ "$size" -lt "$local_min" ] && size=$TARGET_OCPU
-    echo -n "[$(date -u '+%H:%M:%S') $SOURCE] GROW ${POC}→${size}oc ${ad_short}: "
+    echo -n "[$(date '+%H:%M:%S %Z') $SOURCE] GROW ${POC}→${size}oc ${ad_short}: "
     if [ -z "$PID" ]; then echo "no primary, re-survey"; break; fi
     result=$(sign_send put "${INST_PATH}/${PID}" "$(resize_body "$size" "$gb")")
   fi

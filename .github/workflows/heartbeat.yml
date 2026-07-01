@@ -22,35 +22,28 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set +e
-          # Total hunter runs in last 24h via API total_count
-          runs=$(curl -s -H "Authorization: token $GH_TOKEN" \
-            "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/runs?per_page=1&created=>$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')" \
-            | python3 -c 'import sys,json;
-try: print(json.load(sys.stdin).get("total_count","?"))
-except: print("?")' 2>/dev/null)
-          [ -z "$runs" ] && runs="?"
-
-          # Is hunter fresh? (last run <15 min ago)
-          last=$(curl -s -H "Authorization: token $GH_TOKEN" \
-            "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/runs?per_page=1" \
-            | grep -o '"created_at":"[^"]*"' | head -1 | cut -d'"' -f4)
-          mark="🟢"; note=""
-          if [ -n "$last" ]; then
-            le=$(date -d "$last" +%s 2>/dev/null || echo 0)
-            gap=$(( $(date +%s) - le ))
-            if [ "$le" -gt 0 ] && [ "$gap" -gt 900 ]; then
-              mark="🟡"; note="%0A⚠️ Последний запуск ${gap}с назад — проверь Actions"
-              # nudge a fresh run
-              curl -s -X POST -H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/dispatches" -d '{"ref":"main"}' >/dev/null 2>&1
+          RESP=$(curl -s -H "Authorization: token $GH_TOKEN" "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/runs?per_page=1")
+          RUNS=$(echo "$RESP" | grep -o '"total_count":[0-9]*' | head -1 | cut -d: -f2)
+          [ -z "$RUNS" ] && RUNS="?"
+          LAST=$(echo "$RESP" | grep -o '"created_at":"[^"]*"' | head -1 | cut -d'"' -f4)
+          MARK="green"
+          NOTE=""
+          if [ -n "$LAST" ]; then
+            LE=$(date -d "$LAST" +%s 2>/dev/null)
+            [ -z "$LE" ] && LE=0
+            GAP=$(( $(date +%s) - LE ))
+            if [ "$LE" -gt 0 ] && [ "$GAP" -gt 900 ]; then
+              MARK="yellow"
+              NOTE="%0A(!) posledniy zapusk ${GAP}s nazad - nudge"
+              curl -s -X POST -H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/dispatches" -d '{"ref":"main"}' >/dev/null 2>&1
             fi
           fi
-
-          msg="${mark} Hunter жив, ищу A1.Flex.%0A🕐 $(date -u '+%H:%M UTC')%0A🔄 Запусков за 24ч: ${runs}%0A🎯 Слот пока не пойман${note}%0A📊 https://github.com/${GH_REPO}/actions"
-
+          EMO=$([ "$MARK" = "green" ] && echo "🟢" || echo "🟡")
+          MSG="${EMO} Hunter zhiv, ishchu A1.Flex.%0A🕐 $(date -u '+%H:%M') UTC%0A🔄 vsego zapuskov: ${RUNS}%0A🎯 slot poka ne poyman${NOTE}%0A📊 https://github.com/${GH_REPO}/actions"
+          OK=0
           for i in 1 2 3; do
-            curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
-              -d "chat_id=${TG_CHAT_ID}" -d "text=${msg}" 2>&1 | grep -q '"ok":true' && exit 0
+            R=$(curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" -d "chat_id=${TG_CHAT_ID}" -d "text=${MSG}")
+            echo "$R" | grep -q '"ok":true' && { OK=1; break; }
             sleep 5
           done
-          echo "::error::heartbeat TG failed"
+          [ "$OK" = "1" ] && echo "heartbeat sent" || echo "::error::TG failed"
