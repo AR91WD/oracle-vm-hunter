@@ -69,19 +69,55 @@ jobs:
               -d "$body" 2>&1
           }
 
+          # Retry TG send up to 3 times on failure
           tg_notify() {
             [ -z "$TG_CHAT_ID" ] && return
-            curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
-              -d "chat_id=${TG_CHAT_ID}" -d "text=$1" > /dev/null 2>&1
+            local msg="$1"
+            local i
+            for i in 1 2 3; do
+              local resp
+              resp=$(curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+                -d "chat_id=${TG_CHAT_ID}" -d "text=${msg}" 2>&1)
+              if echo "$resp" | grep -q '"ok":true'; then
+                return 0
+              fi
+              sleep 3
+            done
+            echo "::warning::Telegram send failed after 3 retries"
+            return 1
           }
 
           gh_issue() {
+            local title=$(printf '%s' "$1" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
+            local body=$(printf '%s' "$2" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
             curl -s --max-time 15 -X POST \
               -H "Authorization: token $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/$GH_REPO/issues" \
-              -d "$(printf '{"title":"%s","body":"%s"}' "$1" "$2")" > /dev/null 2>&1
+              -d "{\"title\":${title},\"body\":${body}}" > /dev/null 2>&1
           }
+
+          # Trigger heartbeat if last one was >2h ago (safer than cron)
+          maybe_heartbeat() {
+            local last
+            last=$(curl -s -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/repos/$GH_REPO/actions/workflows/heartbeat.yml/runs?per_page=1&status=success" \
+              | grep -o '"created_at":"[^"]*"' | head -1 | cut -d'"' -f4)
+            [ -z "$last" ] && return
+            local last_epoch=$(date -d "$last" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last" +%s 2>/dev/null || echo 0)
+            local now_epoch=$(date +%s)
+            local diff=$((now_epoch - last_epoch))
+            if [ "$diff" -gt 7200 ]; then
+              echo "Heartbeat overdue (${diff}s), triggering"
+              curl -s -X POST \
+                -H "Authorization: token $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/$GH_REPO/actions/workflows/heartbeat.yml/dispatches" \
+                -d '{"ref":"main"}' > /dev/null 2>&1
+            fi
+          }
+
+          maybe_heartbeat
 
           # Run for ~4 minutes (workflow timeout 5 min, leave buffer)
           END=$(($(date +%s) + 240))
@@ -89,6 +125,8 @@ jobs:
           rate_limited=0
           sleep_between=6
           ok_streak=0
+          auth_fail_count=0
+          circuit_open=0
 
           while [ $(date +%s) -lt $END ]; do
             attempt=$((attempt + 1))
@@ -101,16 +139,16 @@ jobs:
 
               result=$(oci_sign_and_post "$body")
 
+              # SUCCESS
               if echo "$result" | grep -q '"lifecycleState"'; then
                 state=$(echo "$result" | grep -o '"lifecycleState"[^,]*' | head -1 | cut -d'"' -f4)
                 if [ "$state" = "PROVISIONING" ] || [ "$state" = "RUNNING" ]; then
                   vm_id=$(echo "$result" | grep -o '"id":"ocid1.instance[^"]*"' | head -1 | cut -d'"' -f4)
                   echo "VM CREATED! ($state) OCID: $vm_id"
                   echo "$result" | python3 -m json.tool 2>/dev/null || echo "$result"
-                  echo "::notice::VM CREATED in $ad_short with state $state OCID $vm_id"
+                  echo "::notice::VM CREATED in $ad_short OCID $vm_id"
                   tg_notify "🎉 ПОЗДРАВЛЯЮ! У тебя есть виртуальный сервер!%0A%0AAD: ${ad_short}%0AState: ${state}%0AOCID: ${vm_id}%0A%0AOracle Console: https://cloud.oracle.com/compute/instances"
-                  gh_issue "VM CREATED in ${ad_short}" "Oracle A1.Flex VM provisioned at $(date -u).%0A%0A**State:** ${state}%0A**AD:** ${ad_short}%0A**OCID:** \`${vm_id}\`%0A%0AConsole: https://cloud.oracle.com/compute/instances%0A%0AStop further runs: disable workflow at https://github.com/${GH_REPO}/actions/workflows/retry-vm.yml"
-                  # Disable workflow so subsequent cron runs don't try again
+                  gh_issue "VM CREATED in ${ad_short}" "Oracle A1.Flex VM provisioned at $(date -u). State: ${state}. AD: ${ad_short}. OCID: ${vm_id}. Console: https://cloud.oracle.com/compute/instances"
                   curl -s -X PUT \
                     -H "Authorization: token $GH_TOKEN" \
                     -H "Accept: application/vnd.github+json" \
@@ -120,6 +158,7 @@ jobs:
                 fi
               fi
 
+              # RATE LIMIT
               if echo "$result" | grep -q "TooManyRequests"; then
                 ok_streak=0
                 if [ "$sleep_between" -lt 12 ]; then
@@ -127,8 +166,40 @@ jobs:
                 fi
                 echo "rate-limited (90s pause, sleep→${sleep_between}s)"
                 rate_limited=$((rate_limited + 1))
-                sleep 90
+                # Circuit breaker: 15 rate-limits in run = 5 min cooldown
+                if [ "$rate_limited" -ge 15 ] && [ "$circuit_open" -eq 0 ]; then
+                  echo "::warning::Circuit breaker OPEN — ${rate_limited} rate-limits, cooling 300s"
+                  circuit_open=1
+                  sleep 300
+                else
+                  sleep 90
+                fi
                 break
+              fi
+
+              # AUTH FAILURE detection
+              if echo "$result" | grep -qE "NotAuthenticated|Authentication failed|InvalidSignature"; then
+                auth_fail_count=$((auth_fail_count + 1))
+                echo "AUTH ERROR"
+                if [ "$auth_fail_count" -ge 3 ]; then
+                  echo "::error::OCI auth failing repeatedly — check OCI_KEY secret"
+                  tg_notify "🚨 ОШИБКА: OCI ключ не работает (${auth_fail_count} fails). Проверь secret OCI_KEY в GitHub. Слот не сможет быть пойман!"
+                  rm -f /tmp/oci-key.pem
+                  exit 1
+                fi
+                sleep 30
+                continue
+              fi
+
+              # UNEXPECTED (not "Out of host capacity", not known error) → maybe API changed
+              if ! echo "$result" | grep -qE "Out of host capacity|InternalError|LimitExceeded|QuotaExceeded"; then
+                short=$(echo "$result" | head -c 200)
+                echo "UNKNOWN: $short"
+                if [ "$attempt" -eq 1 ]; then
+                  tg_notify "⚠️ Странный ответ Oracle API (может быть изменение API):%0A${short}"
+                fi
+                sleep "$sleep_between"
+                continue
               fi
 
               msg=$(echo "$result" | grep -o '"message"[^,]*' | head -1 | cut -d'"' -f4 | cut -c1-60)
@@ -145,14 +216,22 @@ jobs:
           rm -f /tmp/oci-key.pem
           echo "Run finished: ${attempt} attempts/AD, ${rate_limited} rate-limits"
 
-      - name: Self-dispatch next run (cron backup)
+      - name: Self-dispatch next run (safety net)
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          # Trigger next run in ~30 sec to keep continuous coverage even if cron lags
-          sleep 30
+          # If step above failed, notify TG
+          if [ "${{ job.status }}" = "failure" ]; then
+            curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+              -d "chat_id=${TG_CHAT_ID}" \
+              -d "text=🚨 Hunter workflow упал: run $(date -u '+%H:%M UTC'). Смотри логи: https://github.com/${GH_REPO}/actions" > /dev/null 2>&1 || true
+          fi
+          # Chain next run — cron is unreliable on free tier
+          sleep 15
           curl -s -X POST \
             -H "Authorization: token $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
