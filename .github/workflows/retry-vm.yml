@@ -17,6 +17,7 @@ jobs:
       actions: write
     steps:
       - name: Try all ADs in tight loop
+        shell: bash {0}
         env:
           OCI_USER: ${{ secrets.OCI_USER }}
           OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
@@ -31,7 +32,7 @@ jobs:
           IMAGE: "ocid1.image.oc1.eu-frankfurt-1.aaaaaaaa4xniimqv2um47gmhf235bwj2wm45roe55dxxwmhfzqtrm6a3ggeq"
           OCI_REGION: "eu-frankfurt-1"
         run: |
-          set -o pipefail
+          set +e
           echo "$OCI_KEY" > /tmp/oci-key.pem
           chmod 600 /tmp/oci-key.pem
 
@@ -218,6 +219,7 @@ jobs:
 
       - name: Self-dispatch next run (safety net)
         if: always()
+        shell: bash {0}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}

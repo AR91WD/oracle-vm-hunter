@@ -15,6 +15,7 @@ jobs:
     timeout-minutes: 2
     steps:
       - name: Send Telegram heartbeat (with dedup)
+        shell: bash {0}
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
