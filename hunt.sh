@@ -33,6 +33,20 @@ tg() {
   done
 }
 
+# Send an alert at most once per hour per key (kills spam during flaky internet)
+STATE_DIR="${STATE_DIR:-$HOME/.vmhunter-state}"
+mkdir -p "$STATE_DIR" 2>/dev/null
+alert_dedup() {
+  local key="$1" msg="$2" f="${STATE_DIR}/alert-${key}" now
+  now=$(date +%s)
+  if [ -f "$f" ]; then
+    local last; last=$(cat "$f" 2>/dev/null); [ -z "$last" ] && last=0
+    [ $((now - last)) -lt 3600 ] && return
+  fi
+  echo "$now" > "$f"
+  tg "$msg"
+}
+
 # sign_send METHOD PATH [BODY]
 sign_send() {
   local method="$1" path="$2" body="$3"
@@ -153,6 +167,19 @@ while [ $(date +%s) -lt $END ]; do
     result=$(sign_send put "${INST_PATH}/${PID}" "$(resize_body "$size" "$gb")")
   fi
 
+  # TRANSIENT network/transport failure (flaky internet): empty body, curl error,
+  # HTML error page, or DNS failure. Do NOT alert — just wait for net and retry.
+  if [ -z "$result" ] || echo "$result" | grep -qiE "curl:|Could not resolve|Connection (refused|reset|timed out)|Operation timed out|Failed to connect|<html|<!DOCTYPE|Empty reply|SSL|handshake"; then
+    echo "net blip / transient — waiting"
+    # brief wait for connectivity to recover
+    n=0
+    while ! curl -sf --max-time 5 https://oracle.com >/dev/null 2>&1; do
+      n=$((n+1)); [ "$n" -ge 30 ] && break; sleep 5
+    done
+    sleep 3
+    continue
+  fi
+
   # SUCCESS (create → PROVISIONING/RUNNING; grow → returns instance with shapeConfig)
   if echo "$result" | grep -q '"lifecycleState"'; then
     st=$(echo "$result" | grep -o '"lifecycleState"[^,]*' | head -1 | cut -d'"' -f4)
@@ -206,18 +233,18 @@ while [ $(date +%s) -lt $END ]; do
     continue
   fi
 
-  # AUTH FAIL — degrade, alert once, keep trying
+  # AUTH FAIL — degrade, alert MAX 1/hour, keep trying
   if echo "$result" | grep -qiE "NotAuthenticated|Authentication failed|InvalidSignature|Failed to verify"; then
     echo "AUTH FAIL"
-    tg "🚨 ${SOURCE}: OCI ключ не проходит авторизацию. Проверь OCI_KEY. Продолжаю стучать (вдруг временный сбой)."
+    alert_dedup "auth" "🚨 ${SOURCE}: OCI ключ не проходит авторизацию. Проверь OCI_KEY. Продолжаю стучать (вдруг временный сбой)."
     sleep 30
     continue
   fi
 
-  # UNKNOWN — possible API change
+  # UNKNOWN — possible API change, alert MAX 1/hour
   short=$(echo "$result" | head -c 150 | tr '\n' ' ')
   echo "UNKNOWN: $short"
-  tg "⚠️ ${SOURCE}: странный ответ Oracle (возможно API изменился):%0A${short}%0AПродолжаю старым методом."
+  alert_dedup "unknown" "⚠️ ${SOURCE}: странный ответ Oracle (возможно API изменился):%0A${short}%0AПродолжаю старым методом."
   sleep "$sleep_between"
 done
 

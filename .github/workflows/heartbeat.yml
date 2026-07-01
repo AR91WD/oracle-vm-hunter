@@ -2,7 +2,6 @@ name: Heartbeat
 on:
   schedule:
     - cron: '0 */2 * * *'
-    - cron: '30 */2 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -14,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - name: Send Telegram heartbeat (with dedup)
+      - name: Send Telegram heartbeat
         shell: bash {0}
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
@@ -22,58 +21,36 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
-          # Get last SUCCESSFUL heartbeat time (excluding this run)
-          last=$(curl -s -H "Authorization: token $GH_TOKEN" \
-            "https://api.github.com/repos/$GH_REPO/actions/workflows/heartbeat.yml/runs?per_page=5&status=success" \
-            | grep -o '"created_at":"[^"]*"' | sed -n '2p' | cut -d'"' -f4)
-
-          if [ -n "$last" ]; then
-            last_epoch=$(date -d "$last" +%s 2>/dev/null || echo 0)
-            now_epoch=$(date +%s)
-            diff=$((now_epoch - last_epoch))
-            # Skip if last heartbeat was <90 min ago (avoid double-fires from dual cron)
-            if [ "$diff" -lt 5400 ]; then
-              echo "Last heartbeat only ${diff}s ago, skipping"
-              exit 0
-            fi
-          fi
-
-          # Count workflow activity
+          set +e
+          # Total hunter runs in last 24h via API total_count
           runs=$(curl -s -H "Authorization: token $GH_TOKEN" \
-            "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/runs?per_page=100" \
-            | grep -c '"status":"completed"' || echo "?")
+            "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/runs?per_page=1&created=>$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+            | python3 -c 'import sys,json;
+try: print(json.load(sys.stdin).get("total_count","?"))
+except: print("?")' 2>/dev/null)
+          [ -z "$runs" ] && runs="?"
 
-          # Check if hunter workflow is still active (last run <10 min ago)
-          hunter_last=$(curl -s -H "Authorization: token $GH_TOKEN" \
+          # Is hunter fresh? (last run <15 min ago)
+          last=$(curl -s -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/runs?per_page=1" \
             | grep -o '"created_at":"[^"]*"' | head -1 | cut -d'"' -f4)
-
-          hunter_status="🟢"
-          hunter_note=""
-          if [ -n "$hunter_last" ]; then
-            hepoch=$(date -d "$hunter_last" +%s 2>/dev/null || echo 0)
-            now=$(date +%s)
-            gap=$((now - hepoch))
-            if [ "$gap" -gt 600 ]; then
-              hunter_status="🟡"
-              hunter_note="%0A⚠️ Последний hunter run был ${gap}с назад — проверь"
+          mark="🟢"; note=""
+          if [ -n "$last" ]; then
+            le=$(date -d "$last" +%s 2>/dev/null || echo 0)
+            gap=$(( $(date +%s) - le ))
+            if [ "$le" -gt 0 ] && [ "$gap" -gt 900 ]; then
+              mark="🟡"; note="%0A⚠️ Последний запуск ${gap}с назад — проверь Actions"
+              # nudge a fresh run
+              curl -s -X POST -H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/dispatches" -d '{"ref":"main"}' >/dev/null 2>&1
             fi
           fi
 
-          msg="${hunter_status} Hunter жив, ищу A1.Flex.%0A%0A🕐 $(date -u '+%H:%M UTC') / $(TZ=Europe/Paris date '+%H:%M CEST')%0A🔄 Запусков за 24ч: ${runs}%0A🎯 Слот пока не пойман — продолжаю${hunter_note}%0A%0A📊 https://github.com/${GH_REPO}/actions"
+          msg="${mark} Hunter жив, ищу A1.Flex.%0A🕐 $(date -u '+%H:%M UTC')%0A🔄 Запусков за 24ч: ${runs}%0A🎯 Слот пока не пойман${note}%0A📊 https://github.com/${GH_REPO}/actions"
 
-          # Retry TG up to 3 times
           for i in 1 2 3; do
-            resp=$(curl -s --max-time 10 -X POST \
-              "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
-              -d "chat_id=${TG_CHAT_ID}" \
-              -d "text=${msg}" 2>&1)
-            if echo "$resp" | grep -q '"ok":true'; then
-              echo "Heartbeat sent"
-              exit 0
-            fi
-            echo "Attempt $i failed, retrying..."
+            curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+              -d "chat_id=${TG_CHAT_ID}" -d "text=${msg}" 2>&1 | grep -q '"ok":true' && exit 0
             sleep 5
           done
-          echo "::error::Telegram heartbeat failed after 3 retries"
-          exit 1
+          echo "::error::heartbeat TG failed"
