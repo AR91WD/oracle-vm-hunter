@@ -1,0 +1,4 @@
+{"ts":1783017412,"source":"MAC","workers":[{"source":"MAC","ad":"3","attempts":15,"min_size":1,"max_size":4,"rate_limits":2,"elapsed":254}]}
+{"ts":1783017691,"source":"MAC","workers":[{"source":"MAC","ad":"2","attempts":11,"min_size":1,"max_size":4,"rate_limits":3,"elapsed":273}]}
+{"ts":1783017945,"source":"MAC","workers":[{"source":"MAC","ad":"2","attempts":20,"min_size":1,"max_size":4,"rate_limits":1,"elapsed":248}]}
+{"ts":1783018197,"source":"MAC","workers":[{"source":"MAC","ad":"2","attempts":20,"min_size":1,"max_size":4,"rate_limits":1,"elapsed":246}]}
