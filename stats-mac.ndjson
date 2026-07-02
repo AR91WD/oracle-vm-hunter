@@ -58,3 +58,5 @@
 {"ts":1783032392,"source":"MAC","workers":[{"source":"MAC","ad":"1","attempts":16,"min_size":1,"max_size":4,"rate_limits":2,"elapsed":263}]}
 {"ts":1783032647,"source":"MAC","workers":[{"source":"MAC","ad":"2","attempts":14,"min_size":1,"max_size":4,"rate_limits":2,"elapsed":247}]}
 {"ts":1783032903,"source":"MAC","workers":[{"source":"MAC","ad":"2","attempts":14,"min_size":1,"max_size":4,"rate_limits":2,"elapsed":249}]}
+{"ts":1783033153,"source":"MAC","workers":[{"source":"MAC","ad":"1","attempts":13,"min_size":1,"max_size":4,"rate_limits":2,"elapsed":240}]}
+{"ts":1783033400,"source":"MAC","workers":[{"source":"MAC","ad":"1","attempts":13,"min_size":1,"max_size":4,"rate_limits":2,"elapsed":241}]}

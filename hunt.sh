@@ -144,19 +144,77 @@ echo "[$SOURCE] mode=${MODE}"
 RUN_START=$(date +%s)
 END=$((RUN_START + DURATION))
 size=$TARGET_OCPU
-sleep_between=8
 rate=0
 ad_i=0
 attempt=0
 min_seen=$size
 max_seen=$size
 
+# --- Smooth adaptive pacing (replaces burst + long dead-pause) ---
+# Measured tenancy-wide budget: Oracle accepts ~1 launch/resize request per
+# ~15s per tenancy (empirical: 491 accepted / 7200s over a 2h window). With
+# 4 workers total (3 GH matrix + 1 Mac), per-worker spacing of ~60s puts the
+# aggregate stream right at that ceiling with near-zero 429s and — critically —
+# near-zero dead air. Old scheme (8-15s bursts then 60-120s pauses on 429)
+# had the same average throughput but terrible worst-case gaps; a transient
+# capacity window opening during a dead pause was unwatchable. Uniform spacing
+# minimizes the max-gap between probes, which is what actually determines the
+# chance of catching a short-lived slot.
+PACE="${PACE_BASE:-60}"
+PACE_MIN=40
+PACE_MAX=90
+clean_streak=0
+
+pace_sleep() {
+  # ±20% jitter keeps the 4 independent workers from drifting into sync
+  # (synchronized probes collide on the same bucket token → clustered 429s).
+  local j=$((PACE / 5))
+  [ "$j" -lt 1 ] && j=1
+  local s=$((PACE - j + RANDOM % (2 * j + 1)))
+  sleep "$s"
+}
+
+# Size selection: alternate the SMALLEST viable size with a descending cycle of
+# larger ones — [1,4,1,3,1,2] in create mode. Rationale: when capacity frees up
+# it is usually a small crumb; 1 OCPU has by far the highest fit probability, so
+# it gets 50% of probes (was 25% under the plain 4→3→2→1 cycle). The large
+# sizes stay in rotation so a big block, if one opens, is still grabbed within
+# ~2 probes. In grow mode same idea relative to current size: alternate the
+# minimal next step (POC+1, most likely to fit) with the remaining larger sizes.
+pick_size() {
+  if [ "$MODE" = "create" ]; then
+    if [ $((attempt % 2)) -eq 1 ]; then
+      size=1
+    else
+      case $(( (attempt / 2) % 3 )) in
+        1) size=$TARGET_OCPU ;;
+        2) size=$((TARGET_OCPU - 1)) ;;
+        0) size=$((TARGET_OCPU - 2)) ;;
+      esac
+    fi
+  else
+    local minv=$((POC + 1))
+    if [ $((attempt % 2)) -eq 1 ]; then
+      size=$minv
+    else
+      local span=$((TARGET_OCPU - minv))
+      if [ "$span" -le 0 ]; then
+        size=$minv
+      else
+        size=$((TARGET_OCPU - ( (attempt / 2) % span )))
+      fi
+    fi
+  fi
+  [ "$size" -gt "$TARGET_OCPU" ] && size=$TARGET_OCPU
+  [ "$size" -lt 1 ] && size=1
+}
+
 # One-line compact JSON telemetry, emitted once at every run-ending exit point.
 # Consumed downstream by retry-vm.yml's relaunch job (GH side) or retry-vm.sh (Mac side).
 emit_stats() {
   local elapsed=$(( $(date +%s) - RUN_START ))
   [ "$elapsed" -lt 1 ] && elapsed=1
-  echo "STATS $(date -u +%s) {\"source\":\"${SOURCE}\",\"ad\":\"${ad_short:-n/a}\",\"attempts\":${attempt},\"min_size\":${min_seen},\"max_size\":${max_seen},\"rate_limits\":${rate},\"elapsed\":${elapsed}}"
+  echo "STATS $(date -u +%s) {\"source\":\"${SOURCE}\",\"ad\":\"${ad_short:-n/a}\",\"attempts\":${attempt},\"min_size\":${min_seen},\"max_size\":${max_seen},\"rate_limits\":${rate},\"elapsed\":${elapsed},\"pace\":${PACE}}"
 }
 
 while [ $(date +%s) -lt $END ]; do
@@ -164,20 +222,17 @@ while [ $(date +%s) -lt $END ]; do
   ad="${ADS[$((ad_i % ${#ADS[@]}))]}"
   ad_i=$((ad_i + 1))
   ad_short="${ad##*-}"
-  gb=$((size * GB_PER_OCPU))
   attempt=$((attempt + 1))
+  pick_size
+  gb=$((size * GB_PER_OCPU))
   [ "$size" -lt "$min_seen" ] && min_seen=$size
   [ "$size" -gt "$max_seen" ] && max_seen=$size
 
   if [ "$MODE" = "create" ]; then
-    [ "$size" -lt 1 ] && size=$TARGET_OCPU
-    echo -n "[$(TZ='Europe/Paris' date '+%H:%M:%S %Z') $SOURCE] CREATE ${size}oc/${gb}gb ${ad_short}: "
+    echo -n "[$(TZ='Europe/Paris' date '+%H:%M:%S %Z') $SOURCE] CREATE ${size}oc/${gb}gb ${ad_short} (pace ${PACE}s): "
     result=$(sign_send post "$INST_PATH" "$(create_body "$ad" "$size" "$gb")")
   else
-    # grow existing primary; only sizes strictly greater than current primary
-    local_min=$((POC + 1))
-    [ "$size" -lt "$local_min" ] && size=$TARGET_OCPU
-    echo -n "[$(TZ='Europe/Paris' date '+%H:%M:%S %Z') $SOURCE] GROW ${POC}→${size}oc ${ad_short}: "
+    echo -n "[$(TZ='Europe/Paris' date '+%H:%M:%S %Z') $SOURCE] GROW ${POC}→${size}oc ${ad_short} (pace ${PACE}s): "
     if [ -z "$PID" ]; then echo "no primary, re-survey"; break; fi
     result=$(sign_send put "${INST_PATH}/${PID}" "$(resize_body "$size" "$gb")")
   fi
@@ -219,34 +274,44 @@ while [ $(date +%s) -lt $END ]; do
     fi
   fi
 
-  # OUT OF CAPACITY → step size down (try smaller chunk)
+  # OUT OF CAPACITY — a clean (accepted) response; sequence handles size variety.
   if echo "$result" | grep -qiE "Out of host capacity|OutOfCapacity|InternalError"; then
     echo "no capacity @${size}oc"
-    size=$((size - 1))
-    if [ "$MODE" = "create" ] && [ "$size" -lt 1 ]; then size=$TARGET_OCPU; fi
-    if [ "$MODE" = "grow" ] && [ "$size" -le "$POC" ]; then size=$TARGET_OCPU; fi
-    sleep "$sleep_between"
+    clean_streak=$((clean_streak + 1))
+    if [ "$clean_streak" -ge 6 ] && [ "$PACE" -gt "$PACE_MIN" ]; then
+      PACE=$((PACE - 2)); clean_streak=0
+    fi
+    pace_sleep
     continue
   fi
 
-  # LIMIT: already have max for this size — in grow mode means resize wouldn't fit; step down
+  # LIMIT/QUOTA: at size 1 in create mode this means quota is actually occupied
+  # (survey disagreed) — exit and let the next generation re-survey.
   if echo "$result" | grep -qiE "LimitExceeded|QuotaExceeded"; then
     echo "limit @${size}oc"
-    size=$((size - 1))
-    if [ "$MODE" = "create" ] && [ "$size" -lt 1 ]; then
-      echo "[$SOURCE] full capacity used, re-survey next run"; emit_stats; exit 0
+    if [ "$MODE" = "create" ] && [ "$size" -le 1 ]; then
+      echo "[$SOURCE] quota occupied at 1oc — re-survey next run"; emit_stats; exit 0
     fi
-    if [ "$MODE" = "grow" ] && [ "$size" -le "$POC" ]; then size=$TARGET_OCPU; fi
-    sleep "$sleep_between"
+    clean_streak=$((clean_streak + 1))
+    pace_sleep
     continue
   fi
 
-  # RATE LIMIT
+  # RATE LIMIT — no more long dead pauses: bump personal spacing and keep the
+  # stream flowing. The adaptive PACE rides just under Oracle's refill rate;
+  # a storm (12+ in one run) still gets one 120s cooldown as a safety valve.
   if echo "$result" | grep -q "TooManyRequests"; then
     rate=$((rate + 1))
-    [ "$sleep_between" -lt 15 ] && sleep_between=$((sleep_between + 1))
-    echo "rate-limited (sleep→${sleep_between}s)"
-    if [ "$rate" -ge 12 ]; then sleep 120; rate=0; else sleep 60; fi
+    clean_streak=0
+    [ "$PACE" -lt "$PACE_MAX" ] && PACE=$((PACE + 10))
+    [ "$PACE" -gt "$PACE_MAX" ] && PACE=$PACE_MAX
+    echo "rate-limited (pace→${PACE}s)"
+    if [ $((rate % 12)) -eq 0 ]; then
+      echo "[$SOURCE] 429 storm — 120s cooldown"
+      sleep 120
+    else
+      pace_sleep
+    fi
     continue
   fi
 
@@ -254,7 +319,7 @@ while [ $(date +%s) -lt $END ]; do
   if echo "$result" | grep -qiE "NotAuthenticated|Authentication failed|InvalidSignature|Failed to verify"; then
     echo "AUTH FAIL"
     alert_dedup "auth" "🚨 ${SOURCE}: OCI ключ не проходит авторизацию. Проверь OCI_KEY. Продолжаю стучать (вдруг временный сбой)."
-    sleep 30
+    pace_sleep
     continue
   fi
 
@@ -262,7 +327,7 @@ while [ $(date +%s) -lt $END ]; do
   short=$(echo "$result" | head -c 150 | tr '\n' ' ')
   echo "UNKNOWN: $short"
   alert_dedup "unknown" "⚠️ ${SOURCE}: странный ответ Oracle (возможно API изменился):%0A${short}%0AПродолжаю старым методом."
-  sleep "$sleep_between"
+  pace_sleep
 done
 
 emit_stats
