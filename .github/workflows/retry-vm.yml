@@ -143,9 +143,14 @@ jobs:
           # 2h on heartbeat.yml's own cron). retry-vm.yml self-dispatches ~every 5min
           # very reliably, so use that cadence to check whether a heartbeat is overdue
           # and fire one directly if so. heartbeat.yml's cron stays as a backup trigger.
+          # NOTE: GitHub's API returns pretty-printed JSON (space after ':'), so the
+          # extraction pattern must tolerate optional whitespace or it silently
+          # matches nothing — this was making LAST always empty, which made
+          # NEED_PING always =1 (piggyback fired every ~5min instead of only when
+          # genuinely overdue). Fixed with [[:space:]]* tolerance below.
           RESP=$(curl -s -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/$GH_REPO/actions/workflows/heartbeat.yml/runs?status=success&per_page=1")
-          LAST=$(echo "$RESP" | grep -o '"created_at":"[^"]*"' | head -1 | cut -d'"' -f4)
+          LAST=$(echo "$RESP" | grep -o '"created_at"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"')
           NEED_PING=0
           if [ -z "$LAST" ]; then
             echo "[piggyback-hb] no prior successful heartbeat run found — pinging"
@@ -204,9 +209,10 @@ jobs:
           HUNT_RESULT: ${{ needs.hunt.result }}
         run: |
           set +e
+          # Same whitespace-tolerance fix as above (pretty-printed JSON from GitHub's API).
           state=$(curl -s -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml" \
-            | grep -o '"state":"[^"]*"' | head -1 | cut -d'"' -f4)
+            | grep -o '"state"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"')
           if [ "$state" = "disabled_manually" ] || [ "$state" = "disabled_inactivity" ]; then
             echo "Workflow disabled ($state) — target reached, not relaunching."
             exit 0

@@ -34,18 +34,25 @@ jobs:
             # macOS/BSD date fallback (not expected on ubuntu-latest, kept defensive)
             SINCE_ISO=$(date -u -v-2H '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)
           fi
+          # NOTE: GitHub's API returns pretty-printed JSON (space after ':'), e.g.
+          # `"total_count": 27` not `"total_count":27` — a plain [0-9]* pattern
+          # with no space tolerance matches zero digits right after the colon and
+          # silently returns empty. This was the actual root cause of the "?"
+          # counter bug: not just missing date-scoping, but this whitespace gap
+          # in the extraction pattern itself. Both are fixed here via [[:space:]]*
+          # tolerance and pulling digits from the tail of the match instead of cut.
           RUNS_2H="?"
           if [ -n "$SINCE_ISO" ]; then
             RESP_COUNT=$(curl -s -H "Authorization: token $GH_TOKEN" \
               "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/runs?created=%3E${SINCE_ISO}")
-            RUNS_2H=$(echo "$RESP_COUNT" | grep -o '"total_count":[0-9]*' | head -1 | cut -d: -f2)
+            RUNS_2H=$(echo "$RESP_COUNT" | grep -o '"total_count"[[:space:]]*:[[:space:]]*[0-9]*' | head -1 | grep -o '[0-9]*$')
             [ -z "$RUNS_2H" ] && RUNS_2H="?"
           fi
 
           # Freshness check (unrelated to the count above): is the hunter chain alive?
           RESP_LAST=$(curl -s -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/runs?per_page=1")
-          LAST=$(echo "$RESP_LAST" | grep -o '"created_at":"[^"]*"' | head -1 | cut -d'"' -f4)
+          LAST=$(echo "$RESP_LAST" | grep -o '"created_at"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"')
           MARK="green"
           NOTE=""
           if [ -n "$LAST" ]; then
