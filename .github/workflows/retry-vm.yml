@@ -77,7 +77,19 @@ jobs:
           # Each STATS line's payload is already valid single-object JSON, so the
           # combined record is built with plain string join — no python/YAML mixing
           # (a past incident here broke YAML parsing silently via inline python).
-          LOG=$(gh run view "$RUN_ID" --log 2>/dev/null)
+          #
+          # GitHub's log archival can lag a few seconds behind job completion —
+          # relaunch starts almost immediately after the last matrix worker
+          # finishes, so gh run view --log can race ahead of log availability.
+          # Retry with backoff instead of accepting a false "no stats" on the
+          # first attempt.
+          LOG=""
+          for attempt in 1 2 3 4 5; do
+            LOG=$(gh run view "$RUN_ID" --log 2>/dev/null)
+            echo "$LOG" | grep -q 'STATS [0-9]* {' && break
+            echo "[stats] attempt ${attempt}: no STATS lines yet (log archival lag?), retrying"
+            sleep 5
+          done
           STATS_PAYLOADS=$(echo "$LOG" | grep -o 'STATS [0-9]* {.*}' | sed -E 's/^STATS [0-9]+ //')
           if [ -z "$STATS_PAYLOADS" ]; then
             echo "[stats] no STATS lines found in this run's logs — skipping record"
