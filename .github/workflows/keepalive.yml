@@ -1,9 +1,13 @@
 name: Keepalive
 # Defeats GitHub's 60-day auto-disable of scheduled workflows on inactive repos.
-# Commits a timestamp weekly + re-enables hunter if GitHub disabled it for inactivity.
+# Commits a timestamp daily + re-enables hunter if GitHub disabled it for inactivity.
+# Daily (not weekly) because GitHub's schedule: cron is empirically unreliable on this
+# repo (heartbeat.yml observed gaps up to ~2.4x its configured interval, and GitHub's
+# own docs say queued scheduled jobs "may be dropped" under high load) — daily gives
+# huge margin under the 60-day cutoff even if several consecutive fires are skipped.
 on:
   schedule:
-    - cron: '17 6 * * 1'
+    - cron: '17 6 * * *'
   workflow_dispatch:
 
 jobs:
