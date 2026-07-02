@@ -60,6 +60,60 @@ jobs:
     permissions:
       actions: write
     steps:
+      - name: Piggyback heartbeat (mitigates flaky GH schedule cron)
+        shell: bash {0}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          set +e
+          # GitHub's schedule: trigger is unreliable (observed gaps of 3-5h instead of
+          # 2h on heartbeat.yml's own cron). retry-vm.yml self-dispatches ~every 5min
+          # very reliably, so use that cadence to check whether a heartbeat is overdue
+          # and fire one directly if so. heartbeat.yml's cron stays as a backup trigger.
+          RESP=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$GH_REPO/actions/workflows/heartbeat.yml/runs?status=success&per_page=1")
+          LAST=$(echo "$RESP" | grep -o '"created_at":"[^"]*"' | head -1 | cut -d'"' -f4)
+          NEED_PING=0
+          if [ -z "$LAST" ]; then
+            echo "[piggyback-hb] no prior successful heartbeat run found — pinging"
+            NEED_PING=1
+          else
+            LE=$(date -d "$LAST" +%s 2>/dev/null)
+            [ -z "$LE" ] && LE=0
+            if [ "$LE" -le 0 ]; then
+              echo "[piggyback-hb] could not parse last heartbeat time ('$LAST') — skipping this cycle"
+            else
+              GAP=$(( $(date +%s) - LE ))
+              echo "[piggyback-hb] last successful heartbeat ${GAP}s ago"
+              [ "$GAP" -gt 6600 ] && NEED_PING=1
+            fi
+          fi
+
+          if [ "$NEED_PING" = "1" ]; then
+            MSG="🟠 Piggyback heartbeat (cron opozdal).%0AHunter zhiv, ishchu A1.Flex.%0A🕐 $(date -u '+%H:%M') UTC%0A📊 https://github.com/${GH_REPO}/actions"
+            OK=0
+            for i in 1 2 3; do
+              R=$(curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+                -d "chat_id=${TG_CHAT_ID}" -d "text=${MSG}")
+              echo "$R" | grep -q '"ok":true' && { OK=1; break; }
+              sleep 5
+            done
+            if [ "$OK" = "1" ]; then
+              echo "[piggyback-hb] fallback heartbeat sent via TG"
+            else
+              echo "::error::[piggyback-hb] fallback TG send failed after 3 retries"
+            fi
+            # Also try to nudge the real workflow so its own run history reflects
+            # the ping (best-effort — do not fail this job if the dispatch fails,
+            # the direct TG send above is the actual fallback delivery mechanism).
+            curl -s -X POST -H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$GH_REPO/actions/workflows/heartbeat.yml/dispatches" \
+              -d '{"ref":"main"}' > /dev/null 2>&1
+          fi
+
       - name: Chain next generation + failure alert
         shell: bash {0}
         env:
@@ -78,7 +132,11 @@ jobs:
             exit 0
           fi
           sleep 15
-          curl -s -X POST -H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+          DISPATCH=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/dispatches" \
-            -d '{"ref":"main"}' > /dev/null 2>&1
+            -d '{"ref":"main"}')
+          if [ "$DISPATCH" != "204" ]; then
+            echo "::error::relaunch dispatch failed (HTTP $DISPATCH) — hunter chain may stop here"
+            exit 1
+          fi
           echo "Next generation dispatched (hunt result: $HUNT_RESULT)"

@@ -46,4 +46,9 @@ jobs:
             echo "$R" | grep -q '"ok":true' && { OK=1; break; }
             sleep 5
           done
-          [ "$OK" = "1" ] && echo "heartbeat sent" || echo "::error::TG failed"
+          if [ "$OK" = "1" ]; then
+            echo "heartbeat sent"
+          else
+            echo "::error::TG failed after 3 retries"
+            exit 1
+          fi

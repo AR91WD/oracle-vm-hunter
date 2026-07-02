@@ -28,7 +28,10 @@ jobs:
           git config user.email "keepalive@users.noreply.github.com"
           git add .keepalive
           git commit -m "keepalive $(date -u '+%Y-%m-%d')" || echo "nothing to commit"
-          git push || echo "push failed"
+          if ! git push; then
+            echo "::error::keepalive git push failed"
+            PUSH_FAILED=1
+          fi
 
           # If GitHub auto-disabled hunter for inactivity, re-enable it
           state=$(curl -s -H "Authorization: token $GH_TOKEN" \
@@ -45,3 +48,5 @@ jobs:
               -d "text=♻️ GitHub усыпил hunter за неактивность — я его разбудил и перезапустил. Охота продолжается." > /dev/null 2>&1
           fi
           echo "keepalive done, hunter state: $state"
+          [ "$PUSH_FAILED" = "1" ] && exit 1
+          exit 0
