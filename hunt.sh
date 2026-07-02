@@ -141,11 +141,23 @@ fi
 if [ "$USED" -eq 0 ]; then MODE="create"; else MODE="grow"; fi
 echo "[$SOURCE] mode=${MODE}"
 
-END=$(($(date +%s) + DURATION))
+RUN_START=$(date +%s)
+END=$((RUN_START + DURATION))
 size=$TARGET_OCPU
 sleep_between=8
 rate=0
 ad_i=0
+attempt=0
+min_seen=$size
+max_seen=$size
+
+# One-line compact JSON telemetry, emitted once at every run-ending exit point.
+# Consumed downstream by retry-vm.yml's relaunch job (GH side) or retry-vm.sh (Mac side).
+emit_stats() {
+  local elapsed=$(( $(date +%s) - RUN_START ))
+  [ "$elapsed" -lt 1 ] && elapsed=1
+  echo "STATS $(date -u +%s) {\"source\":\"${SOURCE}\",\"ad\":\"${ad_short:-n/a}\",\"attempts\":${attempt},\"min_size\":${min_seen},\"max_size\":${max_seen},\"rate_limits\":${rate},\"elapsed\":${elapsed}}"
+}
 
 while [ $(date +%s) -lt $END ]; do
   # pick AD (rotate if multiple)
@@ -153,16 +165,19 @@ while [ $(date +%s) -lt $END ]; do
   ad_i=$((ad_i + 1))
   ad_short="${ad##*-}"
   gb=$((size * GB_PER_OCPU))
+  attempt=$((attempt + 1))
+  [ "$size" -lt "$min_seen" ] && min_seen=$size
+  [ "$size" -gt "$max_seen" ] && max_seen=$size
 
   if [ "$MODE" = "create" ]; then
     [ "$size" -lt 1 ] && size=$TARGET_OCPU
-    echo -n "[$(date '+%H:%M:%S %Z') $SOURCE] CREATE ${size}oc/${gb}gb ${ad_short}: "
+    echo -n "[$(TZ='Europe/Paris' date '+%H:%M:%S %Z') $SOURCE] CREATE ${size}oc/${gb}gb ${ad_short}: "
     result=$(sign_send post "$INST_PATH" "$(create_body "$ad" "$size" "$gb")")
   else
     # grow existing primary; only sizes strictly greater than current primary
     local_min=$((POC + 1))
     [ "$size" -lt "$local_min" ] && size=$TARGET_OCPU
-    echo -n "[$(date '+%H:%M:%S %Z') $SOURCE] GROW ${POC}→${size}oc ${ad_short}: "
+    echo -n "[$(TZ='Europe/Paris' date '+%H:%M:%S %Z') $SOURCE] GROW ${POC}→${size}oc ${ad_short}: "
     if [ -z "$PID" ]; then echo "no primary, re-survey"; break; fi
     result=$(sign_send put "${INST_PATH}/${PID}" "$(resize_body "$size" "$gb")")
   fi
@@ -193,10 +208,12 @@ while [ $(date +%s) -lt $END ]; do
         mkdir -p "$HOME/.vmhunter-state" 2>/dev/null; touch "$HOME/.vmhunter-state/vm-caught" 2>/dev/null
         [ -n "$GH_TOKEN" ] && curl -s -X PUT -H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github+json" \
           "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/disable" >/dev/null 2>&1
+        emit_stats
         exit 0
       else
         tg "✅ Прогресс! Сервер теперь ${newoc} OCPU (цель ${TARGET_OCPU}). Продолжаю растить.%0AOCID:${vm_id}"
         # keep hunting to grow further; re-survey next run
+        emit_stats
         exit 0
       fi
     fi
@@ -217,7 +234,7 @@ while [ $(date +%s) -lt $END ]; do
     echo "limit @${size}oc"
     size=$((size - 1))
     if [ "$MODE" = "create" ] && [ "$size" -lt 1 ]; then
-      echo "[$SOURCE] full capacity used, re-survey next run"; exit 0
+      echo "[$SOURCE] full capacity used, re-survey next run"; emit_stats; exit 0
     fi
     if [ "$MODE" = "grow" ] && [ "$size" -le "$POC" ]; then size=$TARGET_OCPU; fi
     sleep "$sleep_between"
@@ -248,4 +265,5 @@ while [ $(date +%s) -lt $END ]; do
   sleep "$sleep_between"
 done
 
+emit_stats
 echo "[$SOURCE] run done"

@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
+      - uses: actions/checkout@v4
+
       - name: Send Telegram heartbeat
         shell: bash {0}
         env:
@@ -22,10 +24,28 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set +e
-          RESP=$(curl -s -H "Authorization: token $GH_TOKEN" "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/runs?per_page=1")
-          RUNS=$(echo "$RESP" | grep -o '"total_count":[0-9]*' | head -1 | cut -d: -f2)
-          [ -z "$RUNS" ] && RUNS="?"
-          LAST=$(echo "$RESP" | grep -o '"created_at":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+          # Real run count scoped to "last 2h" (the heartbeat interval), via the
+          # created:>=<ISO8601> query param — total_count is meaningful only when
+          # scoped like this (an unscoped total_count is a lifetime counter, not
+          # useful context for "is the hunter actively running right now").
+          SINCE_ISO=$(date -u -d '2 hours ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)
+          if [ -z "$SINCE_ISO" ]; then
+            # macOS/BSD date fallback (not expected on ubuntu-latest, kept defensive)
+            SINCE_ISO=$(date -u -v-2H '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)
+          fi
+          RUNS_2H="?"
+          if [ -n "$SINCE_ISO" ]; then
+            RESP_COUNT=$(curl -s -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/runs?created=%3E${SINCE_ISO}")
+            RUNS_2H=$(echo "$RESP_COUNT" | grep -o '"total_count":[0-9]*' | head -1 | cut -d: -f2)
+            [ -z "$RUNS_2H" ] && RUNS_2H="?"
+          fi
+
+          # Freshness check (unrelated to the count above): is the hunter chain alive?
+          RESP_LAST=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/runs?per_page=1")
+          LAST=$(echo "$RESP_LAST" | grep -o '"created_at":"[^"]*"' | head -1 | cut -d'"' -f4)
           MARK="green"
           NOTE=""
           if [ -n "$LAST" ]; then
@@ -34,12 +54,33 @@ jobs:
             GAP=$(( $(date +%s) - LE ))
             if [ "$LE" -gt 0 ] && [ "$GAP" -gt 900 ]; then
               MARK="yellow"
-              NOTE="%0A(!) posledniy zapusk ${GAP}s nazad - nudge"
+              NOTE="%0A(!) Последний запуск ${GAP}с назад — подталкиваю новый цикл."
               curl -s -X POST -H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$GH_REPO/actions/workflows/retry-vm.yml/dispatches" -d '{"ref":"main"}' >/dev/null 2>&1
             fi
           fi
           EMO=$([ "$MARK" = "green" ] && echo "🟢" || echo "🟡")
-          MSG="${EMO} Hunter zhiv, ishchu A1.Flex.%0A🕐 $(date -u '+%H:%M') UTC%0A🔄 vsego zapuskov: ${RUNS}%0A🎯 slot poka ne poyman${NOTE}%0A📊 https://github.com/${GH_REPO}/actions"
+
+          # Real operational telemetry (requests/sizes/AD breakdown/rate) from the
+          # checked-out stats-gh.ndjson + stats-mac.ndjson, scoped to the last 2h.
+          # stats_report.py never fails hard (missing files -> zeroed report), so
+          # this always produces usable text even before the first STATS record lands.
+          STATS_TEXT=$(python3 stats_report.py --hours 2 2>/dev/null)
+          if [ -z "$STATS_TEXT" ]; then
+            STATS_TEXT="Статистика недоступна (файлы stats-*.ndjson ещё не появились)."
+          fi
+          # Join multiline text into one %0A-separated line for Telegram's text=
+          # param. Plain bash read-loop instead of a sed multi-line idiom — BSD vs
+          # GNU sed disagree on that syntax and this needs to work identically
+          # whether tested locally (BSD) or run on ubuntu-latest (GNU).
+          STATS_ENCODED=""
+          FIRST_LINE=1
+          while IFS= read -r LINE; do
+            if [ "$FIRST_LINE" = "1" ]; then STATS_ENCODED="$LINE"; FIRST_LINE=0; else STATS_ENCODED="${STATS_ENCODED}%0A${LINE}"; fi
+          done <<< "$STATS_TEXT"
+
+          PARIS_TIME=$(TZ='Europe/Paris' date '+%H:%M %Z')
+          MSG="${EMO} Хантер жив, ищу A1.Flex.%0A🕐 ${PARIS_TIME}%0A🔄 Запусков за последние 2ч: ${RUNS_2H}%0A🎯 Слот пока не пойман${NOTE}%0A%0A📈 ${STATS_ENCODED}%0A%0A📊 https://github.com/${GH_REPO}/actions"
+
           OK=0
           for i in 1 2 3; do
             R=$(curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" -d "chat_id=${TG_CHAT_ID}" -d "text=${MSG}")

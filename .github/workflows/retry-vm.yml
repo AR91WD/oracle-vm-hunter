@@ -59,7 +59,77 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       actions: write
+      contents: write
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect STATS telemetry from this generation's hunt logs
+        id: stats
+        shell: bash {0}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set +e
+          # Pull this run's full log (all 3 matrix workers) and grep out the
+          # STATS lines hunt.sh emits at the end of each AD's hunt loop.
+          # Each STATS line's payload is already valid single-object JSON, so the
+          # combined record is built with plain string join — no python/YAML mixing
+          # (a past incident here broke YAML parsing silently via inline python).
+          LOG=$(gh run view "$RUN_ID" --log 2>/dev/null)
+          STATS_PAYLOADS=$(echo "$LOG" | grep -o 'STATS [0-9]* {.*}' | sed -E 's/^STATS [0-9]+ //')
+          if [ -z "$STATS_PAYLOADS" ]; then
+            echo "[stats] no STATS lines found in this run's logs — skipping record"
+            echo "has_stats=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          WORKERS=""
+          N=0
+          while IFS= read -r payload; do
+            [ -z "$payload" ] && continue
+            N=$((N + 1))
+            if [ -z "$WORKERS" ]; then WORKERS="$payload"; else WORKERS="${WORKERS},${payload}"; fi
+          done <<< "$STATS_PAYLOADS"
+
+          if [ "$N" -eq 0 ]; then
+            echo "[stats] no valid STATS payloads parsed — skipping record"
+            echo "has_stats=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "{\"ts\":$(date -u +%s),\"source\":\"GH\",\"workers\":[${WORKERS}]}" >> stats-gh.ndjson
+          echo "[stats] appended record with ${N} worker(s)"
+          echo "has_stats=1" >> "$GITHUB_OUTPUT"
+
+      - name: Commit + push stats-gh.ndjson
+        if: steps.stats.outputs.has_stats == '1'
+        shell: bash {0}
+        run: |
+          set +e
+          git config user.name "vm-hunter-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add stats-gh.ndjson
+
+          push_once() {
+            git commit -m "stats: append GH generation telemetry [skip ci]" --quiet
+            git pull --rebase --quiet
+            git push --quiet
+          }
+
+          if push_once; then
+            echo "[stats] stats-gh.ndjson pushed"
+          else
+            echo "[stats] push failed, retrying once after rebase"
+            git pull --rebase --quiet
+            if git push --quiet; then
+              echo "[stats] stats-gh.ndjson pushed on retry"
+            else
+              echo "::warning::[stats] could not push stats-gh.ndjson after retry — non-critical, continuing"
+            fi
+          fi
+
       - name: Piggyback heartbeat (mitigates flaky GH schedule cron)
         shell: bash {0}
         env:
@@ -93,7 +163,17 @@ jobs:
           fi
 
           if [ "$NEED_PING" = "1" ]; then
-            MSG="🟠 Piggyback heartbeat (cron opozdal).%0AHunter zhiv, ishchu A1.Flex.%0A🕐 $(date -u '+%H:%M') UTC%0A📊 https://github.com/${GH_REPO}/actions"
+            PARIS_TIME=$(TZ='Europe/Paris' date '+%H:%M %Z')
+            STATS_TEXT=$(python3 stats_report.py --hours 2 2>/dev/null)
+            [ -z "$STATS_TEXT" ] && STATS_TEXT="Статистика недоступна (файлы stats-*.ndjson ещё не появились)."
+            # Join multiline text into one %0A-separated line — plain bash
+            # read-loop, not sed (BSD vs GNU sed disagree on the multi-line idiom).
+            STATS_ENCODED=""
+            FIRST_LINE=1
+            while IFS= read -r LINE; do
+              if [ "$FIRST_LINE" = "1" ]; then STATS_ENCODED="$LINE"; FIRST_LINE=0; else STATS_ENCODED="${STATS_ENCODED}%0A${LINE}"; fi
+            done <<< "$STATS_TEXT"
+            MSG="🟠 Резервное уведомление: обычный heartbeat от GitHub задержался (это известное ограничение расписаний GitHub Actions), поэтому шлю статус напрямую.%0A%0A✅ Хантер жив, ищу A1.Flex.%0A🕐 ${PARIS_TIME}%0A%0A📈 ${STATS_ENCODED}%0A%0A📊 https://github.com/${GH_REPO}/actions"
             OK=0
             for i in 1 2 3; do
               R=$(curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
