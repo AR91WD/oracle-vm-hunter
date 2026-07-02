@@ -63,36 +63,47 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Collect STATS telemetry from this generation's hunt logs
+      - name: Collect STATS telemetry from the previous generation's hunt logs
         id: stats
         shell: bash {0}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
         run: |
           set +e
-          # Pull this run's full log (all 3 matrix workers) and grep out the
-          # STATS lines hunt.sh emits at the end of each AD's hunt loop.
-          # Each STATS line's payload is already valid single-object JSON, so the
-          # combined record is built with plain string join — no python/YAML mixing
-          # (a past incident here broke YAML parsing silently via inline python).
-          #
-          # GitHub's log archival can lag a few seconds behind job completion —
-          # relaunch starts almost immediately after the last matrix worker
-          # finishes, so gh run view --log can race ahead of log availability.
-          # Retry with backoff instead of accepting a false "no stats" on the
-          # first attempt.
-          LOG=""
-          for attempt in 1 2 3 4 5; do
-            LOG=$(gh run view "$RUN_ID" --log 2>/dev/null)
-            echo "$LOG" | grep -q 'STATS [0-9]* {' && break
-            echo "[stats] attempt ${attempt}: no STATS lines yet (log archival lag?), retrying"
-            sleep 5
-          done
+          # Deliberately reads the PREVIOUS run's logs, not this run's own —
+          # live-tested and found GitHub's log archival can lag well past 30s
+          # behind job completion, and relaunch starts within seconds of the
+          # last matrix worker finishing, so fetching *this* run's own logs
+          # races log availability by construction (confirmed: the same run's
+          # STATS lines were retrievable a few minutes later, just not yet at
+          # relaunch-time). Reading the previous run instead — which finished
+          # a full ~5min generation cycle ago — sidesteps the race entirely.
+          # A run_id-tagged dedup guard on stats-gh.ndjson prevents ever
+          # double-recording the same source run if this logic overlaps.
+          PREV_RUN_ID=$(gh run list -R "$GH_REPO" --workflow=retry-vm.yml --status completed \
+            --limit 5 --json databaseId,createdAt -q 'sort_by(.createdAt) | reverse | .[].databaseId' \
+            | grep -v "^${CURRENT_RUN_ID}$" | head -1)
+
+          if [ -z "$PREV_RUN_ID" ]; then
+            echo "[stats] no previous completed run found — skipping this cycle"
+            echo "has_stats=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "[stats] reading logs from previous run ${PREV_RUN_ID} (current: ${CURRENT_RUN_ID})"
+
+          # Dedup guard: skip if we already recorded this source run.
+          if [ -f stats-gh.ndjson ] && grep -q "\"src_run\":${PREV_RUN_ID}[,}]" stats-gh.ndjson; then
+            echo "[stats] run ${PREV_RUN_ID} already recorded — skipping"
+            echo "has_stats=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          LOG=$(gh run view "$PREV_RUN_ID" -R "$GH_REPO" --log 2>/dev/null)
           STATS_PAYLOADS=$(echo "$LOG" | grep -o 'STATS [0-9]* {.*}' | sed -E 's/^STATS [0-9]+ //')
           if [ -z "$STATS_PAYLOADS" ]; then
-            echo "[stats] no STATS lines found in this run's logs — skipping record"
+            echo "[stats] no STATS lines found in run ${PREV_RUN_ID}'s logs — skipping record"
             echo "has_stats=0" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -111,8 +122,8 @@ jobs:
             exit 0
           fi
 
-          echo "{\"ts\":$(date -u +%s),\"source\":\"GH\",\"workers\":[${WORKERS}]}" >> stats-gh.ndjson
-          echo "[stats] appended record with ${N} worker(s)"
+          echo "{\"ts\":$(date -u +%s),\"source\":\"GH\",\"src_run\":${PREV_RUN_ID},\"workers\":[${WORKERS}]}" >> stats-gh.ndjson
+          echo "[stats] appended record with ${N} worker(s) from run ${PREV_RUN_ID}"
           echo "has_stats=1" >> "$GITHUB_OUTPUT"
 
       - name: Commit + push stats-gh.ndjson
