@@ -200,3 +200,7 @@
 {"ts":1783071401,"source":"MAC","workers":[{"source":"MAC","ad":"2","attempts":5,"min_size":1,"max_size":4,"rate_limits":0,"elapsed":290,"pace":60}]}
 {"ts":1783071656,"source":"MAC","workers":[{"source":"MAC","ad":"1","attempts":4,"min_size":1,"max_size":4,"rate_limits":0,"elapsed":247,"pace":60}]}
 {"ts":1783071956,"source":"MAC","workers":[{"source":"MAC","ad":"2","attempts":5,"min_size":1,"max_size":4,"rate_limits":0,"elapsed":292,"pace":60}]}
+{"ts":1783072206,"source":"MAC","workers":[{"source":"MAC","ad":"1","attempts":4,"min_size":1,"max_size":4,"rate_limits":0,"elapsed":240,"pace":60}]}
+{"ts":1783072464,"source":"MAC","workers":[{"source":"MAC","ad":"1","attempts":4,"min_size":1,"max_size":4,"rate_limits":1,"elapsed":251,"pace":70}]}
+{"ts":1783072731,"source":"MAC","workers":[{"source":"MAC","ad":"1","attempts":4,"min_size":1,"max_size":4,"rate_limits":0,"elapsed":260,"pace":60}]}
+{"ts":1783073002,"source":"MAC","workers":[{"source":"MAC","ad":"1","attempts":4,"min_size":1,"max_size":4,"rate_limits":0,"elapsed":264,"pace":60}]}
