@@ -130,14 +130,24 @@ jobs:
           echo "[stats] appended record with ${N} worker(s) from run ${PREV_RUN_ID}"
           echo "has_stats=1" >> "$GITHUB_OUTPUT"
 
-      - name: Commit + push stats-gh.ndjson
+          # Same log, wider net: per-probe EVENT lines (full-latency + response
+          # class per request) for the rigorous audit — timeline reconstruction,
+          # full-cycle timing, per-worker/per-size breakdown. The dedup guard
+          # above (on stats-gh.ndjson's src_run) already prevents this whole
+          # step from re-running against an already-recorded run, so no
+          # separate dedup needed here — events and stats share one run gate.
+          echo "$LOG" | grep -o 'EVENT [0-9]* {.*}' \
+            | sed -E "s/^EVENT ([0-9]+) \{(.*)\}\$/{\"ts\":\1,\"src_run\":${PREV_RUN_ID},\2}/" >> events-gh.ndjson
+          echo "[events] appended $(echo "$LOG" | grep -c 'EVENT [0-9]* {') event(s) from run ${PREV_RUN_ID}"
+
+      - name: Commit + push stats-gh.ndjson + events-gh.ndjson
         if: steps.stats.outputs.has_stats == '1'
         shell: bash {0}
         run: |
           set +e
           git config user.name "vm-hunter-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add stats-gh.ndjson
+          git add stats-gh.ndjson events-gh.ndjson
 
           push_once() {
             git commit -m "stats: append GH generation telemetry [skip ci]" --quiet
@@ -146,7 +156,7 @@ jobs:
           }
 
           if push_once; then
-            echo "[stats] stats-gh.ndjson pushed"
+            echo "[stats] stats-gh.ndjson + events-gh.ndjson pushed"
           else
             echo "[stats] push failed, retrying once after rebase"
             git pull --rebase --quiet

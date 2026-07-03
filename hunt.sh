@@ -48,6 +48,14 @@ alert_dedup() {
 }
 
 # sign_send METHOD PATH [BODY]
+# Emits the response body AS-IS, plus a trailing "HTTPTIME:x.xxx" line (Oracle's
+# round-trip time, via curl -w — cross-platform, unlike shell `date +%N` which
+# BSD/macOS lacks). NOTE: callers using `result=$(sign_send ...)` run this in a
+# subshell (command substitution), so a side-channel variable set inside the
+# function would NOT survive to the caller — bash subshell semantics. The
+# timing MUST travel through stdout itself; extract_req_ms() below strips it
+# back out and the classification greps below tolerate the extra trailing line
+# unchanged (they only grep -q for substrings elsewhere in the body).
 sign_send() {
   local method="$1" path="$2" body="$3"
   local now key_id sig_string signature M
@@ -59,7 +67,7 @@ sign_send() {
 date: ${now}
 host: ${API_HOST}"
     signature=$(printf '%s' "$sig_string" | openssl dgst -sha256 -sign "$KEY_FILE" | b64)
-    curl -s --max-time 15 -X GET "https://${API_HOST}${path}" \
+    curl -s -w '\nHTTPTIME:%{time_total}' --max-time 15 -X GET "https://${API_HOST}${path}" \
       -H "date: ${now}" -H "host: ${API_HOST}" \
       -H "authorization: Signature version=\"1\",keyId=\"${key_id}\",algorithm=\"rsa-sha256\",headers=\"(request-target) date host\",signature=\"${signature}\"" 2>&1
   else
@@ -73,13 +81,26 @@ content-length: ${len}
 content-type: application/json
 x-content-sha256: ${sha}"
     signature=$(printf '%s' "$sig_string" | openssl dgst -sha256 -sign "$KEY_FILE" | b64)
-    curl -s --max-time 15 -X "$M" "https://${API_HOST}${path}" \
+    curl -s -w '\nHTTPTIME:%{time_total}' --max-time 15 -X "$M" "https://${API_HOST}${path}" \
       -H "date: ${now}" -H "host: ${API_HOST}" \
       -H "content-type: application/json" -H "content-length: ${len}" \
       -H "x-content-sha256: ${sha}" \
       -H "authorization: Signature version=\"1\",keyId=\"${key_id}\",algorithm=\"rsa-sha256\",headers=\"(request-target) date host content-length content-type x-content-sha256\",signature=\"${signature}\"" \
       -d "$body" 2>&1
   fi
+}
+
+# Extracts the HTTPTIME line sign_send appended and echoes milliseconds (int).
+extract_req_ms() {
+  local tt
+  tt=$(printf '%s' "$1" | grep -o 'HTTPTIME:[0-9.]*' | tail -1 | cut -d: -f2)
+  awk -v x="${tt:-0}" 'BEGIN{printf "%d", x*1000}' 2>/dev/null
+}
+
+# Strips the HTTPTIME line so downstream classification greps see only the
+# real Oracle response body, unchanged from before this instrumentation.
+strip_req_ms() {
+  printf '%s' "$1" | grep -v '^HTTPTIME:'
 }
 
 create_body() {
@@ -97,6 +118,7 @@ resize_body() {
 survey() {
   local resp
   resp=$(sign_send get "${INST_PATH}?compartmentId=${COMPARTMENT}")
+  resp=$(strip_req_ms "$resp")
   printf '%s' "$resp" | python3 -c '
 import sys,json
 try:
@@ -153,9 +175,23 @@ max_seen=$size
 # accepted-vs-rejected split, per-size attempt counts, worst blind gap).
 no_cap=0
 other_cnt=0
+limit_cnt=0
+auth_cnt=0
 sc1=0; sc2=0; sc3=0; sc4=0
 last_probe=0
 max_gap=0
+sum_req_ms=0
+sum_cycle_s=0
+# Per-probe raw event log (separate from the end-of-run aggregate): one line
+# per HTTP request with class + real Oracle latency, so a full-cycle
+# (send -> Oracle response -> next send) timeline can be reconstructed later,
+# instead of only the configured sleep. Printed to stdout (like STATS); the
+# caller captures it — retry-vm.yml's relaunch job via log-scraping, or
+# retry-vm.sh (Mac) via its existing `tee` capture of hunt.sh's output.
+emit_event() {
+  local class="$1" req_ms="$2"
+  echo "EVENT $(date -u +%s) {\"source\":\"${SOURCE}\",\"ad\":\"${ad_short}\",\"size\":${size},\"class\":\"${class}\",\"req_ms\":${req_ms},\"pace\":${PACE}}"
+}
 
 # --- AIMD adaptive pacing (TCP-congestion-control style) ---
 # Overnight A/B data (2026-07-03) killed the fixed-ceiling assumption: the old
@@ -236,7 +272,10 @@ emit_stats() {
   [ "$elapsed" -lt 1 ] && elapsed=1
   # Persist learned pace for the next invocation (Mac only; no-op on GH).
   [ -n "$PACE_STATE_FILE" ] && echo "$PACE" > "$PACE_STATE_FILE" 2>/dev/null
-  echo "STATS $(date -u +%s) {\"source\":\"${SOURCE}\",\"ad\":\"${ad_short:-n/a}\",\"attempts\":${attempt},\"min_size\":${min_seen},\"max_size\":${max_seen},\"rate_limits\":${rate},\"elapsed\":${elapsed},\"pace\":${PACE},\"no_cap\":${no_cap},\"other\":${other_cnt},\"s1\":${sc1},\"s2\":${sc2},\"s3\":${sc3},\"s4\":${sc4},\"max_gap\":${max_gap}}"
+  local avg_req_ms=0 avg_cycle_s=0 cycle_n=$((attempt - 1))
+  [ "$attempt" -gt 0 ] && avg_req_ms=$((sum_req_ms / attempt))
+  [ "$cycle_n" -gt 0 ] && avg_cycle_s=$(awk -v s="$sum_cycle_s" -v n="$cycle_n" 'BEGIN{printf "%.1f", s/n}')
+  echo "STATS $(date -u +%s) {\"source\":\"${SOURCE}\",\"ad\":\"${ad_short:-n/a}\",\"attempts\":${attempt},\"min_size\":${min_seen},\"max_size\":${max_seen},\"rate_limits\":${rate},\"elapsed\":${elapsed},\"pace\":${PACE},\"no_cap\":${no_cap},\"other\":${other_cnt},\"limit\":${limit_cnt},\"auth\":${auth_cnt},\"s1\":${sc1},\"s2\":${sc2},\"s3\":${sc3},\"s4\":${sc4},\"max_gap\":${max_gap},\"avg_req_ms\":${avg_req_ms},\"avg_cycle_s\":${avg_cycle_s}}"
 }
 
 while [ $(date +%s) -lt $END ]; do
@@ -254,6 +293,7 @@ while [ $(date +%s) -lt $END ]; do
   if [ "$last_probe" -gt 0 ]; then
     g=$((now_probe - last_probe))
     [ "$g" -gt "$max_gap" ] && max_gap=$g
+    sum_cycle_s=$((sum_cycle_s + g))
   fi
   last_probe=$now_probe
 
@@ -265,11 +305,15 @@ while [ $(date +%s) -lt $END ]; do
     if [ -z "$PID" ]; then echo "no primary, re-survey"; break; fi
     result=$(sign_send put "${INST_PATH}/${PID}" "$(resize_body "$size" "$gb")")
   fi
+  req_ms=$(extract_req_ms "$result")
+  result=$(strip_req_ms "$result")
+  sum_req_ms=$((sum_req_ms + req_ms))
 
   # TRANSIENT network/transport failure (flaky internet): empty body, curl error,
   # HTML error page, or DNS failure. Do NOT alert — just wait for net and retry.
   if [ -z "$result" ] || echo "$result" | grep -qiE "curl:|Could not resolve|Connection (refused|reset|timed out)|Operation timed out|Failed to connect|<html|<!DOCTYPE|Empty reply|SSL|handshake"; then
     echo "net blip / transient — waiting"
+    emit_event "transient" "$req_ms"
     # brief wait for connectivity to recover
     n=0
     while ! curl -sf --max-time 5 https://oracle.com >/dev/null 2>&1; do
@@ -287,6 +331,7 @@ while [ $(date +%s) -lt $END ]; do
     if [ "$st" != "TERMINATED" ] && [ "$st" != "TERMINATING" ]; then
       vm_id=$(echo "$result" | grep -o '"id":"ocid1.instance[^"]*"' | head -1 | cut -d'"' -f4)
       echo "OK ${st} now ${newoc} OCPU"
+      emit_event "success" "$req_ms"
       if [ "$newoc" -ge "$TARGET_OCPU" ] 2>/dev/null; then
         tg "🎉 ПОЗДРАВЛЯЮ! Полный сервер 4 OCPU/24GB готов!%0AAD:${ad_short} State:${st}%0AOCID:${vm_id}%0AConsole: https://cloud.oracle.com/compute/instances"
         mkdir -p "$HOME/.vmhunter-state" 2>/dev/null; touch "$HOME/.vmhunter-state/vm-caught" 2>/dev/null
@@ -306,6 +351,7 @@ while [ $(date +%s) -lt $END ]; do
   # OUT OF CAPACITY — a clean (accepted) response; sequence handles size variety.
   if echo "$result" | grep -qiE "Out of host capacity|OutOfCapacity|InternalError"; then
     echo "no capacity @${size}oc"
+    emit_event "no_cap" "$req_ms"
     no_cap=$((no_cap + 1))
     clean_streak=$((clean_streak + 1))
     # Additive increase: 2 clean responses → speed up by 2s (AIMD probing
@@ -322,6 +368,8 @@ while [ $(date +%s) -lt $END ]; do
   # (survey disagreed) — exit and let the next generation re-survey.
   if echo "$result" | grep -qiE "LimitExceeded|QuotaExceeded"; then
     echo "limit @${size}oc"
+    emit_event "limit" "$req_ms"
+    limit_cnt=$((limit_cnt + 1))
     if [ "$MODE" = "create" ] && [ "$size" -le 1 ]; then
       echo "[$SOURCE] quota occupied at 1oc — re-survey next run"; emit_stats; exit 0
     fi
@@ -336,6 +384,7 @@ while [ $(date +%s) -lt $END ]; do
   # 429s are the expected cost of riding near the ceiling — tolerated, not
   # over-corrected.
   if echo "$result" | grep -q "TooManyRequests"; then
+    emit_event "429" "$req_ms"
     rate=$((rate + 1))
     clean_streak=0
     PACE=$((PACE * 3 / 2))
@@ -353,6 +402,8 @@ while [ $(date +%s) -lt $END ]; do
   # AUTH FAIL — degrade, alert MAX 1/hour, keep trying
   if echo "$result" | grep -qiE "NotAuthenticated|Authentication failed|InvalidSignature|Failed to verify"; then
     echo "AUTH FAIL"
+    emit_event "auth" "$req_ms"
+    auth_cnt=$((auth_cnt + 1))
     alert_dedup "auth" "🚨 ${SOURCE}: OCI ключ не проходит авторизацию. Проверь OCI_KEY. Продолжаю стучать (вдруг временный сбой)."
     pace_sleep
     continue
@@ -361,6 +412,7 @@ while [ $(date +%s) -lt $END ]; do
   # UNKNOWN — possible API change, alert MAX 1/hour
   short=$(echo "$result" | head -c 150 | tr '\n' ' ')
   echo "UNKNOWN: $short"
+  emit_event "unknown" "$req_ms"
   other_cnt=$((other_cnt + 1))
   alert_dedup "unknown" "⚠️ ${SOURCE}: странный ответ Oracle (возможно API изменился):%0A${short}%0AПродолжаю старым методом."
   pace_sleep
