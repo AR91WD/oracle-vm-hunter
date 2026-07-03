@@ -192,10 +192,14 @@ def main():
     combined_no_cap = gh["total_no_cap"] + mac["total_no_cap"]
     combined_other = gh["total_other"] + mac["total_other"]
     if combined_no_cap or combined_rate_limits or combined_other:
-        accepted = combined_no_cap
+        # Honest labels: "no capacity" is a NEGATIVE answer (Oracle processed the
+        # request but had no hosts) — not a success. 429 means the request was
+        # never even considered. The distinction matters for tuning: no-capacity
+        # probes are "useful" (they would have caught a slot had one existed),
+        # 429s are pure waste.
         lines.append(
-            f"Классы ответов: принято Oracle (no capacity): {accepted}, "
-            f"отклонено (429): {combined_rate_limits}, прочие: {combined_other}"
+            f"Ответы Oracle: no-capacity (обработан, мест нет): {combined_no_cap}, "
+            f"429 (не рассмотрен): {combined_rate_limits}, прочие: {combined_other}"
         )
 
     gh_rate = fmt_rate(gh["total_attempts"], gh["total_elapsed"])
