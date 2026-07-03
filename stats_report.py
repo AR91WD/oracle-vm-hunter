@@ -55,6 +55,12 @@ def summarize(records):
     min_size = None
     max_size = None
     per_ad = {}  # ad -> attempts
+    per_ad_429 = {}  # ad -> rate_limits
+    per_size = {}  # ocpu (int) -> attempts, from s1..s4 keys
+    total_no_cap = 0
+    total_other = 0
+    max_gap = 0
+    last_pace = None
     generations = 0
 
     for rec in records:
@@ -85,6 +91,25 @@ def summarize(records):
                 max_size = mx if max_size is None else max(max_size, mx)
 
             per_ad[ad] = per_ad.get(ad, 0) + (int(attempts) if isinstance(attempts, (int, float)) else 0)
+            if isinstance(rate_limits, (int, float)) and rate_limits:
+                per_ad_429[ad] = per_ad_429.get(ad, 0) + int(rate_limits)
+
+            nc = w.get("no_cap")
+            if isinstance(nc, (int, float)):
+                total_no_cap += int(nc)
+            ot = w.get("other")
+            if isinstance(ot, (int, float)):
+                total_other += int(ot)
+            for ocpu in (1, 2, 3, 4):
+                sv = w.get(f"s{ocpu}")
+                if isinstance(sv, (int, float)) and sv:
+                    per_size[ocpu] = per_size.get(ocpu, 0) + int(sv)
+            mg = w.get("max_gap")
+            if isinstance(mg, (int, float)) and mg > max_gap:
+                max_gap = int(mg)
+            pc = w.get("pace")
+            if isinstance(pc, (int, float)):
+                last_pace = int(pc)
 
     return {
         "generations": generations,
@@ -94,6 +119,12 @@ def summarize(records):
         "min_size": min_size,
         "max_size": max_size,
         "per_ad": per_ad,
+        "per_ad_429": per_ad_429,
+        "per_size": per_size,
+        "total_no_cap": total_no_cap,
+        "total_other": total_other,
+        "max_gap": max_gap,
+        "last_pace": last_pace,
     }
 
 
@@ -142,9 +173,55 @@ def main():
         ad_parts = ", ".join(f"{ad}: {n}" for ad, n in sorted(gh["per_ad"].items()))
         lines.append(f"По зонам (GH): {ad_parts}")
 
+    combined_ad_429 = {}
+    for src in (gh, mac):
+        for ad, n in src["per_ad_429"].items():
+            combined_ad_429[ad] = combined_ad_429.get(ad, 0) + n
+    if combined_ad_429:
+        parts = ", ".join(f"{ad}: {n}" for ad, n in sorted(combined_ad_429.items()))
+        lines.append(f"429 по зонам: {parts}")
+
+    combined_size = {}
+    for src in (gh, mac):
+        for ocpu, n in src["per_size"].items():
+            combined_size[ocpu] = combined_size.get(ocpu, 0) + n
+    if combined_size:
+        parts = ", ".join(f"{ocpu}oc: {n}" for ocpu, n in sorted(combined_size.items()))
+        lines.append(f"Попытки по размерам: {parts}")
+
+    combined_no_cap = gh["total_no_cap"] + mac["total_no_cap"]
+    combined_other = gh["total_other"] + mac["total_other"]
+    if combined_no_cap or combined_rate_limits or combined_other:
+        accepted = combined_no_cap
+        lines.append(
+            f"Классы ответов: принято Oracle (no capacity): {accepted}, "
+            f"отклонено (429): {combined_rate_limits}, прочие: {combined_other}"
+        )
+
     gh_rate = fmt_rate(gh["total_attempts"], gh["total_elapsed"])
     mac_rate = fmt_rate(mac["total_attempts"], mac["total_elapsed"])
     lines.append(f"Скорость запросов: GH {gh_rate}/сек, Mac {mac_rate}/сек")
+
+    def avg_interval(src):
+        if src["total_attempts"] > 0 and src["total_elapsed"] > 0:
+            return f"{src['total_elapsed'] / src['total_attempts']:.0f}с"
+        return "—"
+    gaps = [g for g in (gh["max_gap"], mac["max_gap"]) if g]
+    worst_gap = f"{max(gaps)}с" if gaps else "—"
+    lines.append(
+        f"Интервал между запросами: средний GH {avg_interval(gh)} / Mac {avg_interval(mac)}, "
+        f"макс. слепое окно (на воркера): {worst_gap}"
+    )
+
+    paces = [p for p in (gh["last_pace"], mac["last_pace"]) if p is not None]
+    if paces:
+        pace_parts = []
+        if gh["last_pace"] is not None:
+            pace_parts.append(f"GH {gh['last_pace']}с")
+        if mac["last_pace"] is not None:
+            pace_parts.append(f"Mac {mac['last_pace']}с")
+        lines.append(f"Текущий темп (AIMD): {', '.join(pace_parts)} на воркера")
+
     lines.append(f"Превышений лимита (rate-limit): {combined_rate_limits}")
     lines.append(f"Поколений хантера учтено: GH {gh['generations']}, Mac {mac['generations']}")
 

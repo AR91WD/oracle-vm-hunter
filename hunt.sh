@@ -149,25 +149,45 @@ ad_i=0
 attempt=0
 min_seen=$size
 max_seen=$size
+# Response-class counters + probe-interval telemetry (user-requested visibility:
+# accepted-vs-rejected split, per-size attempt counts, worst blind gap).
+no_cap=0
+other_cnt=0
+sc1=0; sc2=0; sc3=0; sc4=0
+last_probe=0
+max_gap=0
 
-# --- Smooth adaptive pacing (replaces burst + long dead-pause) ---
-# Measured tenancy-wide budget: Oracle accepts ~1 launch/resize request per
-# ~15s per tenancy (empirical: 491 accepted / 7200s over a 2h window). With
-# 4 workers total (3 GH matrix + 1 Mac), per-worker spacing of ~60s puts the
-# aggregate stream right at that ceiling with near-zero 429s and — critically —
-# near-zero dead air. Old scheme (8-15s bursts then 60-120s pauses on 429)
-# had the same average throughput but terrible worst-case gaps; a transient
-# capacity window opening during a dead pause was unwatchable. Uniform spacing
-# minimizes the max-gap between probes, which is what actually determines the
-# chance of catching a short-lived slot.
-PACE="${PACE_BASE:-60}"
-PACE_MIN=40
-PACE_MAX=90
+# --- AIMD adaptive pacing (TCP-congestion-control style) ---
+# Overnight A/B data (2026-07-03) killed the fixed-ceiling assumption: the old
+# burst algorithm got 1276 ACCEPTED requests/2h (1 per 5.6s) at ~11% rejection,
+# while a conservative fixed 60s pace got only ~350/2h — Oracle's real ceiling
+# is far higher than the early 1-per-15s estimate, and the ~11% of 429s under
+# fixed sleeps were largely sync-collisions between workers (jitter alone cut
+# rejection to ~2%), not a sustained-rate cap. So: do NOT pick a pace by hand.
+# Additive-increase / multiplicative-decrease finds the knee automatically:
+# every 2 clean responses speed up by 2s; on a 429 slow down by ×1.5. The
+# equilibrium hovers just under whatever Oracle currently tolerates, and
+# re-adapts if Oracle changes its limiter. Jitter stays — it is what actually
+# fixed the collision waste.
+PACE="${PACE_BASE:-18}"
+PACE_MIN="${PACE_MIN:-12}"
+PACE_MAX="${PACE_MAX:-75}"
 clean_streak=0
+
+# Mac persists its learned pace across hunt.sh invocations (GH runners are
+# ephemeral — they restart from PACE_BASE each generation, which is fine: at
+# 18s base a 230s run gets ~12 probes, enough for AIMD to settle within-run).
+if [ -n "$PACE_STATE_FILE" ] && [ -f "$PACE_STATE_FILE" ]; then
+  saved=$(cat "$PACE_STATE_FILE" 2>/dev/null | tr -dc '0-9')
+  if [ -n "$saved" ] && [ "$saved" -ge "$PACE_MIN" ] && [ "$saved" -le "$PACE_MAX" ]; then
+    PACE=$saved
+  fi
+fi
 
 pace_sleep() {
   # ±20% jitter keeps the 4 independent workers from drifting into sync
-  # (synchronized probes collide on the same bucket token → clustered 429s).
+  # (synchronized probes collide in the same instant → clustered 429s; this
+  # was the dominant source of rejections under the old fixed sleeps).
   local j=$((PACE / 5))
   [ "$j" -lt 1 ] && j=1
   local s=$((PACE - j + RANDOM % (2 * j + 1)))
@@ -214,7 +234,9 @@ pick_size() {
 emit_stats() {
   local elapsed=$(( $(date +%s) - RUN_START ))
   [ "$elapsed" -lt 1 ] && elapsed=1
-  echo "STATS $(date -u +%s) {\"source\":\"${SOURCE}\",\"ad\":\"${ad_short:-n/a}\",\"attempts\":${attempt},\"min_size\":${min_seen},\"max_size\":${max_seen},\"rate_limits\":${rate},\"elapsed\":${elapsed},\"pace\":${PACE}}"
+  # Persist learned pace for the next invocation (Mac only; no-op on GH).
+  [ -n "$PACE_STATE_FILE" ] && echo "$PACE" > "$PACE_STATE_FILE" 2>/dev/null
+  echo "STATS $(date -u +%s) {\"source\":\"${SOURCE}\",\"ad\":\"${ad_short:-n/a}\",\"attempts\":${attempt},\"min_size\":${min_seen},\"max_size\":${max_seen},\"rate_limits\":${rate},\"elapsed\":${elapsed},\"pace\":${PACE},\"no_cap\":${no_cap},\"other\":${other_cnt},\"s1\":${sc1},\"s2\":${sc2},\"s3\":${sc3},\"s4\":${sc4},\"max_gap\":${max_gap}}"
 }
 
 while [ $(date +%s) -lt $END ]; do
@@ -227,6 +249,13 @@ while [ $(date +%s) -lt $END ]; do
   gb=$((size * GB_PER_OCPU))
   [ "$size" -lt "$min_seen" ] && min_seen=$size
   [ "$size" -gt "$max_seen" ] && max_seen=$size
+  eval "sc${size}=\$((sc${size} + 1))"
+  now_probe=$(date +%s)
+  if [ "$last_probe" -gt 0 ]; then
+    g=$((now_probe - last_probe))
+    [ "$g" -gt "$max_gap" ] && max_gap=$g
+  fi
+  last_probe=$now_probe
 
   if [ "$MODE" = "create" ]; then
     echo -n "[$(TZ='Europe/Paris' date '+%H:%M:%S %Z') $SOURCE] CREATE ${size}oc/${gb}gb ${ad_short} (pace ${PACE}s): "
@@ -277,9 +306,13 @@ while [ $(date +%s) -lt $END ]; do
   # OUT OF CAPACITY — a clean (accepted) response; sequence handles size variety.
   if echo "$result" | grep -qiE "Out of host capacity|OutOfCapacity|InternalError"; then
     echo "no capacity @${size}oc"
+    no_cap=$((no_cap + 1))
     clean_streak=$((clean_streak + 1))
-    if [ "$clean_streak" -ge 6 ] && [ "$PACE" -gt "$PACE_MIN" ]; then
+    # Additive increase: 2 clean responses → speed up by 2s (AIMD probing
+    # toward Oracle's real ceiling instead of assuming one).
+    if [ "$clean_streak" -ge 2 ] && [ "$PACE" -gt "$PACE_MIN" ]; then
       PACE=$((PACE - 2)); clean_streak=0
+      [ "$PACE" -lt "$PACE_MIN" ] && PACE=$PACE_MIN
     fi
     pace_sleep
     continue
@@ -297,13 +330,15 @@ while [ $(date +%s) -lt $END ]; do
     continue
   fi
 
-  # RATE LIMIT — no more long dead pauses: bump personal spacing and keep the
-  # stream flowing. The adaptive PACE rides just under Oracle's refill rate;
-  # a storm (12+ in one run) still gets one 120s cooldown as a safety valve.
+  # RATE LIMIT — multiplicative decrease (×1.5), no long dead pauses: the
+  # stream keeps flowing at the reduced pace. A storm (12+ in one run) still
+  # gets one 120s cooldown as a safety valve, but at AIMD equilibrium single
+  # 429s are the expected cost of riding near the ceiling — tolerated, not
+  # over-corrected.
   if echo "$result" | grep -q "TooManyRequests"; then
     rate=$((rate + 1))
     clean_streak=0
-    [ "$PACE" -lt "$PACE_MAX" ] && PACE=$((PACE + 10))
+    PACE=$((PACE * 3 / 2))
     [ "$PACE" -gt "$PACE_MAX" ] && PACE=$PACE_MAX
     echo "rate-limited (pace→${PACE}s)"
     if [ $((rate % 12)) -eq 0 ]; then
@@ -326,6 +361,7 @@ while [ $(date +%s) -lt $END ]; do
   # UNKNOWN — possible API change, alert MAX 1/hour
   short=$(echo "$result" | head -c 150 | tr '\n' ' ')
   echo "UNKNOWN: $short"
+  other_cnt=$((other_cnt + 1))
   alert_dedup "unknown" "⚠️ ${SOURCE}: странный ответ Oracle (возможно API изменился):%0A${short}%0AПродолжаю старым методом."
   pace_sleep
 done

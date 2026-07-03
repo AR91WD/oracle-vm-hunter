@@ -42,17 +42,18 @@ jobs:
           OCI_REGION: "eu-frankfurt-1"
           TARGET_OCPU: "4"
           DURATION: "230"
-          PACE_BASE: "60"
+          PACE_BASE: "18"
           SOURCE: "GH"
         run: |
           set +e
           echo "$OCI_KEY" > /tmp/oci-key.pem
           chmod 600 /tmp/oci-key.pem
           export KEY_FILE=/tmp/oci-key.pem
-          # Stagger the 3 matrix runners across the ~60s pace window so the
-          # aggregate request stream is evenly spaced (0/20/40s thirds), not
-          # three probes in the same instant followed by 60s of silence.
-          case "${AD##*-}" in 1) sleep 0;; 2) sleep 20;; 3) sleep 40;; esac
+          # Stagger the 3 matrix runners across the pace window (thirds of the
+          # 18s base) so the aggregate stream starts evenly spaced instead of
+          # three probes in the same instant; per-iteration jitter keeps them
+          # desynchronized after that.
+          case "${AD##*-}" in 1) sleep 0;; 2) sleep 6;; 3) sleep 12;; esac
           bash hunt.sh
           rm -f /tmp/oci-key.pem
 
