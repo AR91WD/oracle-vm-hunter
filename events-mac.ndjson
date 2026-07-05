@@ -1893,3 +1893,15 @@
 {"ts":1783213520,"source":"MAC","ad":"2","size":4,"class":"limit","req_ms":1580,"pace":75}
 {"ts":1783213583,"source":"MAC","ad":"3","size":1,"class":"no_cap","req_ms":1275,"pace":75}
 {"ts":1783213667,"source":"MAC","ad":"1","size":3,"class":"limit","req_ms":2275,"pace":73}
+{"ts":1783213745,"source":"MAC","ad":"1","size":1,"class":"no_cap","req_ms":1446,"pace":73}
+{"ts":1783213809,"source":"MAC","ad":"2","size":4,"class":"limit","req_ms":1261,"pace":73}
+{"ts":1783213888,"source":"MAC","ad":"3","size":1,"class":"no_cap","req_ms":1323,"pace":73}
+{"ts":1783213950,"source":"MAC","ad":"1","size":3,"class":"limit","req_ms":1605,"pace":71}
+{"ts":1783214043,"source":"MAC","ad":"1","size":1,"class":"no_cap","req_ms":1239,"pace":71}
+{"ts":1783214116,"source":"MAC","ad":"2","size":4,"class":"limit","req_ms":1536,"pace":71}
+{"ts":1783214201,"source":"MAC","ad":"3","size":1,"class":"429","req_ms":433,"pace":71}
+{"ts":1783214272,"source":"MAC","ad":"1","size":3,"class":"limit","req_ms":1816,"pace":75}
+{"ts":1783214356,"source":"MAC","ad":"1","size":1,"class":"no_cap","req_ms":1524,"pace":75}
+{"ts":1783214431,"source":"MAC","ad":"2","size":4,"class":"limit","req_ms":1234,"pace":75}
+{"ts":1783214503,"source":"MAC","ad":"3","size":1,"class":"no_cap","req_ms":1216,"pace":75}
+{"ts":1783214578,"source":"MAC","ad":"1","size":3,"class":"limit","req_ms":1467,"pace":73}
