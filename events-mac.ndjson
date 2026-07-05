@@ -2893,3 +2893,9 @@
 {"ts":1783284916,"source":"MAC","ad":"2","size":4,"class":"limit","req_ms":1143,"pace":75}
 {"ts":1783284992,"source":"MAC","ad":"3","size":1,"class":"no_cap","req_ms":1604,"pace":75}
 {"ts":1783285061,"source":"MAC","ad":"1","size":3,"class":"limit","req_ms":2548,"pace":73}
+{"ts":1783285190,"source":"MAC","ad":"1","size":1,"class":"no_cap","req_ms":2865,"pace":73}
+{"ts":1783285278,"source":"MAC","ad":"2","size":4,"class":"transient","req_ms":15068,"pace":73}
+{"ts":1783286711,"source":"MAC","ad":"1","size":1,"class":"no_cap","req_ms":1503,"pace":73}
+{"ts":1783286787,"source":"MAC","ad":"2","size":4,"class":"limit","req_ms":1284,"pace":73}
+{"ts":1783286855,"source":"MAC","ad":"3","size":1,"class":"no_cap","req_ms":1441,"pace":73}
+{"ts":1783286913,"source":"MAC","ad":"1","size":3,"class":"limit","req_ms":1278,"pace":71}
