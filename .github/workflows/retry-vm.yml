@@ -205,7 +205,7 @@ jobs:
           fi
 
           if [ "$NEED_PING" = "1" ]; then
-            PARIS_TIME=$(TZ='Europe/Paris' date '+%H:%M %Z')
+            PARIS_TIME=$(TZ='Europe/Paris' date '+%d.%m.%Y %H:%M %Z')
             STATS_TEXT=$(python3 stats_report.py --hours 2 2>/dev/null)
             [ -z "$STATS_TEXT" ] && STATS_TEXT="Статистика недоступна (файлы stats-*.ndjson ещё не появились)."
             # Join multiline text into one %0A-separated line — plain bash
@@ -215,7 +215,7 @@ jobs:
             while IFS= read -r LINE; do
               if [ "$FIRST_LINE" = "1" ]; then STATS_ENCODED="$LINE"; FIRST_LINE=0; else STATS_ENCODED="${STATS_ENCODED}%0A${LINE}"; fi
             done <<< "$STATS_TEXT"
-            MSG="🟠 Резервное уведомление: обычный heartbeat от GitHub задержался (это известное ограничение расписаний GitHub Actions), поэтому шлю статус напрямую.%0A%0A✅ Хантер жив, ищу A1.Flex.%0A🕐 ${PARIS_TIME}%0A%0A📈 ${STATS_ENCODED}%0A%0A📊 https://github.com/${GH_REPO}/actions"
+            MSG="🟠 Резервное уведомление: обычный heartbeat от GitHub задержался (это известное ограничение расписаний GitHub Actions), поэтому шлю статус напрямую.%0A%0A✅ Хантер жив, ищу A1.Flex.%0A🗓 Отчёт: ${PARIS_TIME}%0A%0A📈 ${STATS_ENCODED}%0A%0A📊 https://github.com/${GH_REPO}/actions"
             OK=0
             for i in 1 2 3; do
               R=$(curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \

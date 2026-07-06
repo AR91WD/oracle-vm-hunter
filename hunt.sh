@@ -213,9 +213,18 @@ clean_streak=0
 # Mac persists its learned pace across hunt.sh invocations (GH runners are
 # ephemeral — they restart from PACE_BASE each generation, which is fine: at
 # 18s base a 230s run gets ~12 probes, enough for AIMD to settle within-run).
+#
+# BUGFIX (2026-07-06): reload ONLY a pace at-or-below PACE_BASE. A persisted
+# HIGH pace (from a transient 429 storm that pushed it to PACE_MAX=75) used to
+# reload every restart and permanently crippled the Mac worker — it crawled at
+# 73s for a full day, ~1 probe/73s, effectively dead. Persist must only ever
+# help (preserve a GOOD low learned pace), never hurt. Optimistic restart:
+# discard bad-high saved paces; within-run AIMD re-finds the ceiling in seconds
+# if Oracle is genuinely limiting right now. Conditions change; pessimism
+# shouldn't be sticky across restarts.
 if [ -n "$PACE_STATE_FILE" ] && [ -f "$PACE_STATE_FILE" ]; then
   saved=$(cat "$PACE_STATE_FILE" 2>/dev/null | tr -dc '0-9')
-  if [ -n "$saved" ] && [ "$saved" -ge "$PACE_MIN" ] && [ "$saved" -le "$PACE_MAX" ]; then
+  if [ -n "$saved" ] && [ "$saved" -ge "$PACE_MIN" ] && [ "$saved" -le "$PACE_BASE" ]; then
     PACE=$saved
   fi
 fi

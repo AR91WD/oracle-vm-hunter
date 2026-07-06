@@ -85,8 +85,8 @@ jobs:
             if [ "$FIRST_LINE" = "1" ]; then STATS_ENCODED="$LINE"; FIRST_LINE=0; else STATS_ENCODED="${STATS_ENCODED}%0A${LINE}"; fi
           done <<< "$STATS_TEXT"
 
-          PARIS_TIME=$(TZ='Europe/Paris' date '+%H:%M %Z')
-          MSG="${EMO} Хантер жив, ищу A1.Flex.%0A🕐 ${PARIS_TIME}%0A🔄 Запусков за последние 2ч: ${RUNS_2H}%0A🎯 Слот пока не пойман${NOTE}%0A%0A📈 ${STATS_ENCODED}%0A%0A📊 https://github.com/${GH_REPO}/actions"
+          PARIS_TIME=$(TZ='Europe/Paris' date '+%d.%m.%Y %H:%M %Z')
+          MSG="${EMO} Хантер жив, ищу A1.Flex.%0A🗓 Отчёт: ${PARIS_TIME}%0A🔄 Запусков за последние 2ч: ${RUNS_2H}%0A🎯 Слот пока не пойман${NOTE}%0A%0A📈 ${STATS_ENCODED}%0A%0A📊 https://github.com/${GH_REPO}/actions"
 
           OK=0
           for i in 1 2 3; do

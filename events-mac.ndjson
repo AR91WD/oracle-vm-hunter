@@ -3631,3 +3631,7 @@
 {"ts":1783339326,"source":"MAC","ad":"2","size":4,"class":"limit","req_ms":1084,"pace":75}
 {"ts":1783339388,"source":"MAC","ad":"3","size":1,"class":"no_cap","req_ms":1358,"pace":75}
 {"ts":1783339474,"source":"MAC","ad":"1","size":3,"class":"limit","req_ms":1022,"pace":73}
+{"ts":1783339548,"source":"MAC","ad":"1","size":1,"class":"no_cap","req_ms":1069,"pace":73}
+{"ts":1783339609,"source":"MAC","ad":"2","size":4,"class":"limit","req_ms":1378,"pace":73}
+{"ts":1783339681,"source":"MAC","ad":"3","size":1,"class":"no_cap","req_ms":1124,"pace":73}
+{"ts":1783339765,"source":"MAC","ad":"1","size":3,"class":"limit","req_ms":1623,"pace":71}
