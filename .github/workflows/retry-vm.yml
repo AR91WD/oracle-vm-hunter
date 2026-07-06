@@ -206,6 +206,10 @@ jobs:
 
           if [ "$NEED_PING" = "1" ]; then
             PARIS_TIME=$(TZ='Europe/Paris' date '+%d.%m.%Y %H:%M %Z')
+            # Fresh Mac telemetry from its dedicated single-writer branch (see
+            # heartbeat.yml for why); overwrite frozen main copy before report.
+            git fetch origin telemetry-mac --depth 1 >/dev/null 2>&1
+            git show origin/telemetry-mac:stats-mac.ndjson > stats-mac.ndjson 2>/dev/null || true
             STATS_TEXT=$(python3 stats_report.py --hours 2 2>/dev/null)
             [ -z "$STATS_TEXT" ] && STATS_TEXT="Статистика недоступна (файлы stats-*.ndjson ещё не появились)."
             # Join multiline text into one %0A-separated line — plain bash

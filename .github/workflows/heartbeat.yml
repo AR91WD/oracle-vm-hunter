@@ -67,8 +67,16 @@ jobs:
           fi
           EMO=$([ "$MARK" = "green" ] && echo "🟢" || echo "🟡")
 
+          # Mac telemetry lives on a DEDICATED branch (telemetry-mac), single-writer
+          # by Mac, to avoid the push-contention on main that made Mac stats never
+          # land (root cause of the long-standing "Mac: 0"). Fetch the fresh Mac
+          # stats from that branch and overwrite the frozen main copy before the
+          # report. stats-gh.ndjson stays from the main checkout (GH writes main).
+          git fetch origin telemetry-mac --depth 1 >/dev/null 2>&1
+          git show origin/telemetry-mac:stats-mac.ndjson > stats-mac.ndjson 2>/dev/null || true
+
           # Real operational telemetry (requests/sizes/AD breakdown/rate) from the
-          # checked-out stats-gh.ndjson + stats-mac.ndjson, scoped to the last 2h.
+          # checked-out stats-gh.ndjson + telemetry-mac's stats-mac.ndjson, last 2h.
           # stats_report.py never fails hard (missing files -> zeroed report), so
           # this always produces usable text even before the first STATS record lands.
           STATS_TEXT=$(python3 stats_report.py --hours 2 2>/dev/null)
