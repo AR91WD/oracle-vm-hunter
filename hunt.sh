@@ -67,7 +67,7 @@ sign_send() {
 date: ${now}
 host: ${host}"
     signature=$(printf '%s' "$sig_string" | openssl dgst -sha256 -sign "$KEY_FILE" | b64)
-    curl -s -w '\nHTTPTIME:%{time_total}' --max-time 15 -X GET "https://${host}${path}" \
+    curl -s -w '\nHTTPMETA:code=%{http_code};total=%{time_total};dns=%{time_namelookup};conn=%{time_connect};tls=%{time_appconnect};ttfb=%{time_starttransfer}' --max-time 15 -X GET "https://${host}${path}" \
       -H "date: ${now}" -H "host: ${host}" \
       -H "authorization: Signature version=\"1\",keyId=\"${key_id}\",algorithm=\"rsa-sha256\",headers=\"(request-target) date host\",signature=\"${signature}\"" 2>&1
   else
@@ -81,7 +81,7 @@ content-length: ${len}
 content-type: application/json
 x-content-sha256: ${sha}"
     signature=$(printf '%s' "$sig_string" | openssl dgst -sha256 -sign "$KEY_FILE" | b64)
-    curl -s -w '\nHTTPTIME:%{time_total}' --max-time 15 -X "$M" "https://${API_HOST}${path}" \
+    curl -s -w '\nHTTPMETA:code=%{http_code};total=%{time_total};dns=%{time_namelookup};conn=%{time_connect};tls=%{time_appconnect};ttfb=%{time_starttransfer}' --max-time 15 -X "$M" "https://${API_HOST}${path}" \
       -H "date: ${now}" -H "host: ${API_HOST}" \
       -H "content-type: application/json" -H "content-length: ${len}" \
       -H "x-content-sha256: ${sha}" \
@@ -90,18 +90,24 @@ x-content-sha256: ${sha}"
   fi
 }
 
-# Extracts the HTTPTIME line sign_send appended and echoes milliseconds (int).
+# The HTTPMETA line carries curl's own timing breakdown + HTTP status. Parse
+# helpers below. This answers the request-cost question (#13: DNS vs TCP vs TLS
+# vs server-think = ttfb-tls) and error taxonomy (#12: classify by http_code).
+_meta_field() { printf '%s' "$1" | grep -o 'HTTPMETA:.*' | tail -1 | tr ';' '\n' | grep "^${2}=" | head -1 | cut -d= -f2; }
 extract_req_ms() {
-  local tt
-  tt=$(printf '%s' "$1" | grep -o 'HTTPTIME:[0-9.]*' | tail -1 | cut -d: -f2)
+  local tt; tt=$(_meta_field "$1" total)
   awk -v x="${tt:-0}" 'BEGIN{printf "%d", x*1000}' 2>/dev/null
 }
-
-# Strips the HTTPTIME line so downstream classification greps see only the
-# real Oracle response body, unchanged from before this instrumentation.
-strip_req_ms() {
-  printf '%s' "$1" | grep -v '^HTTPTIME:'
+extract_http_code() { local c; c=$(printf '%s' "$1" | grep -o 'HTTPMETA:.*' | tail -1 | grep -o 'code=[0-9]*' | head -1 | cut -d= -f2); echo "${c:-0}"; }
+# Cost breakdown in ms: dns / tcp-connect / tls-handshake / server-think.
+extract_cost() {
+  local dns conn tls ttfb total
+  dns=$(_meta_field "$1" dns);  conn=$(_meta_field "$1" conn)
+  tls=$(_meta_field "$1" tls);  ttfb=$(_meta_field "$1" ttfb); total=$(_meta_field "$1" total)
+  awk -v d="${dns:-0}" -v c="${conn:-0}" -v t="${tls:-0}" -v b="${ttfb:-0}" -v tot="${total:-0}" \
+    'BEGIN{printf "dns=%d,tcp=%d,tls=%d,think=%d,body=%d", d*1000, (c-d)*1000, (t-c>0?t-c:0)*1000, (b-t>0?b-t:0)*1000, (tot-b>0?tot-b:0)*1000}'
 }
+strip_req_ms() { printf '%s' "$1" | grep -v '^HTTPMETA:'; }
 
 create_body() {
   local ad="$1" oc="$2" gb="$3"
@@ -226,7 +232,7 @@ sum_cycle_s=0
 # retry-vm.sh (Mac) via its existing `tee` capture of hunt.sh's output.
 emit_event() {
   local class="$1" req_ms="$2"
-  echo "EVENT $(date -u +%s) {\"source\":\"${SOURCE}\",\"ad\":\"${ad_short}\",\"size\":${size},\"class\":\"${class}\",\"req_ms\":${req_ms},\"pace\":${PACE}}"
+  echo "EVENT $(date -u +%s) {\"source\":\"${SOURCE}\",\"ad\":\"${ad_short}\",\"size\":${size},\"class\":\"${class}\",\"req_ms\":${req_ms},\"http\":${http_code:-0},\"cost\":\"${req_cost:-}\",\"pace\":${PACE}}"
 }
 
 # --- AIMD adaptive pacing (TCP-congestion-control style) ---
@@ -246,7 +252,11 @@ emit_event() {
 # reviewer asked for — a worker can now never back off below ~5 probes/gen.
 # During a 429 storm the ×1.5 decrease still applies but caps at 45s, and the
 # every-12th-429 120s cooldown remains as the hard safety valve.
-PACE="${PACE_BASE:-18}"
+PACE_BASE="${PACE_BASE:-18}"   # was only defaulted inline into PACE; the
+                               # pace-load comparison `-le "$PACE_BASE"` needs
+                               # it set explicitly or it breaks when unexported
+                               # (found via the pace-load demo, 2026-07-06).
+PACE="${PACE_BASE}"
 PACE_MIN="${PACE_MIN:-12}"
 PACE_MAX="${PACE_MAX:-45}"
 clean_streak=0
@@ -267,6 +277,9 @@ if [ -n "$PACE_STATE_FILE" ] && [ -f "$PACE_STATE_FILE" ]; then
   saved=$(cat "$PACE_STATE_FILE" 2>/dev/null | tr -dc '0-9')
   if [ -n "$saved" ] && [ "$saved" -ge "$PACE_MIN" ] && [ "$saved" -le "$PACE_BASE" ]; then
     PACE=$saved
+    echo "[$SOURCE] pace-load: file=${saved}s base=${PACE_BASE}s -> effective=${PACE}s (adopted good low pace)"
+  else
+    echo "[$SOURCE] pace-load: file=${saved:-none}s base=${PACE_BASE}s -> effective=${PACE}s (DISCARDED bad-high pace, optimistic restart)"
   fi
 fi
 
@@ -379,6 +392,8 @@ while [ $(date +%s) -lt $END ]; do
     result=$(sign_send put "${INST_PATH}/${PID}" "$(resize_body "$size" "$gb")")
   fi
   req_ms=$(extract_req_ms "$result")
+  http_code=$(extract_http_code "$result")
+  req_cost=$(extract_cost "$result")
   result=$(strip_req_ms "$result")
   sum_req_ms=$((sum_req_ms + req_ms))
 
