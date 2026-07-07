@@ -241,9 +241,14 @@ emit_event() {
 # equilibrium hovers just under whatever Oracle currently tolerates, and
 # re-adapts if Oracle changes its limiter. Jitter stays — it is what actually
 # fixed the collision waste.
+# PACE_MAX lowered 75 -> 45 (2026-07-06): 75s was a near-death crawl (a 240s
+# generation does only ~3 probes at 75s). This is the throughput FLOOR the
+# reviewer asked for — a worker can now never back off below ~5 probes/gen.
+# During a 429 storm the ×1.5 decrease still applies but caps at 45s, and the
+# every-12th-429 120s cooldown remains as the hard safety valve.
 PACE="${PACE_BASE:-18}"
 PACE_MIN="${PACE_MIN:-12}"
-PACE_MAX="${PACE_MAX:-75}"
+PACE_MAX="${PACE_MAX:-45}"
 clean_streak=0
 
 # Mac persists its learned pace across hunt.sh invocations (GH runners are

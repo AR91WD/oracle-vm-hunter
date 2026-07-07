@@ -75,6 +75,19 @@ jobs:
           git fetch origin telemetry-mac --depth 1 >/dev/null 2>&1
           git show origin/telemetry-mac:stats-mac.ndjson > stats-mac.ndjson 2>/dev/null || true
 
+          # Dead/stalled-Mac detector (reviewer point #6): if Mac's newest
+          # telemetry record is older than 20 min, the Mac worker has stalled or
+          # its delivery broke — surface it explicitly instead of silently
+          # showing Mac: 0. GH keeps hunting regardless.
+          MAC_STALE=""
+          MAC_LAST_TS=$(grep -o '"ts":[0-9]*' stats-mac.ndjson 2>/dev/null | tail -1 | cut -d: -f2)
+          if [ -n "$MAC_LAST_TS" ]; then
+            MAC_AGE=$(( $(date +%s) - MAC_LAST_TS ))
+            if [ "$MAC_AGE" -gt 1200 ]; then
+              MAC_STALE="%0A⚠️ Mac-воркер молчит ${MAC_AGE}с (>20мин) — проверь MacBook (GitHub охотится дальше)."
+            fi
+          fi
+
           # Real operational telemetry (requests/sizes/AD breakdown/rate) from the
           # checked-out stats-gh.ndjson + telemetry-mac's stats-mac.ndjson, last 2h.
           # stats_report.py never fails hard (missing files -> zeroed report), so
@@ -94,7 +107,7 @@ jobs:
           done <<< "$STATS_TEXT"
 
           PARIS_TIME=$(TZ='Europe/Paris' date '+%d.%m.%Y %H:%M %Z')
-          MSG="${EMO} Хантер жив, ищу A1.Flex.%0A🗓 Отчёт: ${PARIS_TIME}%0A🔄 Запусков за последние 2ч: ${RUNS_2H}%0A🎯 Слот пока не пойман${NOTE}%0A%0A📈 ${STATS_ENCODED}%0A%0A📊 https://github.com/${GH_REPO}/actions"
+          MSG="${EMO} Хантер жив, ищу A1.Flex.%0A🗓 Отчёт: ${PARIS_TIME}%0A🔄 Запусков за последние 2ч: ${RUNS_2H}%0A🎯 Слот пока не пойман${NOTE}${MAC_STALE}%0A%0A📈 ${STATS_ENCODED}%0A%0A📊 https://github.com/${GH_REPO}/actions"
 
           OK=0
           for i in 1 2 3; do
