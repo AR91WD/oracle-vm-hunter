@@ -59,8 +59,10 @@ def summarize(records):
     per_size = {}  # ocpu (int) -> attempts, from s1..s4 keys
     total_no_cap = 0
     total_other = 0
+    total_limit = 0
     max_gap = 0
     last_pace = None
+    last_avail = None
     generations = 0
 
     for rec in records:
@@ -100,6 +102,9 @@ def summarize(records):
             ot = w.get("other")
             if isinstance(ot, (int, float)):
                 total_other += int(ot)
+            lm = w.get("limit")
+            if isinstance(lm, (int, float)):
+                total_limit += int(lm)
             for ocpu in (1, 2, 3, 4):
                 sv = w.get(f"s{ocpu}")
                 if isinstance(sv, (int, float)) and sv:
@@ -110,6 +115,9 @@ def summarize(records):
             pc = w.get("pace")
             if isinstance(pc, (int, float)):
                 last_pace = int(pc)
+            av = w.get("avail")
+            if isinstance(av, (int, float)) and av >= 0:
+                last_avail = int(av)
 
     return {
         "generations": generations,
@@ -125,6 +133,8 @@ def summarize(records):
         "total_other": total_other,
         "max_gap": max_gap,
         "last_pace": last_pace,
+        "last_avail": last_avail,
+        "total_limit": total_limit,
     }
 
 
@@ -191,16 +201,26 @@ def main():
 
     combined_no_cap = gh["total_no_cap"] + mac["total_no_cap"]
     combined_other = gh["total_other"] + mac["total_other"]
-    if combined_no_cap or combined_rate_limits or combined_other:
-        # Honest labels: "no capacity" is a NEGATIVE answer (Oracle processed the
-        # request but had no hosts) — not a success. 429 means the request was
-        # never even considered. The distinction matters for tuning: no-capacity
-        # probes are "useful" (they would have caught a slot had one existed),
-        # 429s are pure waste.
+    combined_limit = gh.get("total_limit", 0) + mac.get("total_limit", 0)
+    if combined_no_cap or combined_rate_limits or combined_other or combined_limit:
+        # Honest, neutral labels. "no capacity" = Oracle processed the request but
+        # had no host (a negative answer, NOT a success). "limit" = LimitExceeded/
+        # QuotaExceeded (the request was gated by an account/quota check before
+        # capacity was even looked at — we do NOT claim which specific limit).
+        # "429" = TooManyRequests (throttled, not considered). Only no-capacity
+        # probes are "useful" — they'd have caught a slot had one existed.
         lines.append(
-            f"Ответы Oracle: no-capacity (обработан, мест нет): {combined_no_cap}, "
-            f"429 (не рассмотрен): {combined_rate_limits}, прочие: {combined_other}"
+            f"Ответы Oracle: no-capacity (мест нет): {combined_no_cap}, "
+            f"limit/quota (отсечён квотой): {combined_limit}, "
+            f"429 (throttle): {combined_rate_limits}, прочие: {combined_other}"
         )
+
+    # Real A1 allowance Oracle reports for this tenancy (Limits API). This is
+    # the FACT behind why 3-4oc probes get limit/quota: free-tier A1 here is
+    # capped below 4 OCPU. Shown so the picture isn't a guess.
+    avails = [a for a in (gh.get("last_avail"), mac.get("last_avail")) if a is not None]
+    if avails:
+        lines.append(f"Доступно A1 по данным Oracle: {max(avails)} OCPU на зону")
 
     gh_rate = fmt_rate(gh["total_attempts"], gh["total_elapsed"])
     mac_rate = fmt_rate(mac["total_attempts"], mac["total_elapsed"])

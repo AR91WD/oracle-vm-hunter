@@ -57,7 +57,7 @@ alert_dedup() {
 # back out and the classification greps below tolerate the extra trailing line
 # unchanged (they only grep -q for substrings elsewhere in the body).
 sign_send() {
-  local method="$1" path="$2" body="$3"
+  local method="$1" path="$2" body="$3" host="${4:-$API_HOST}"
   local now key_id sig_string signature M
   now=$(date -u '+%a, %d %b %Y %H:%M:%S GMT')
   key_id="${OCI_TENANCY}/${OCI_USER}/${OCI_FINGERPRINT}"
@@ -65,10 +65,10 @@ sign_send() {
   if [ "$method" = "get" ]; then
     sig_string="(request-target): get ${path}
 date: ${now}
-host: ${API_HOST}"
+host: ${host}"
     signature=$(printf '%s' "$sig_string" | openssl dgst -sha256 -sign "$KEY_FILE" | b64)
-    curl -s -w '\nHTTPTIME:%{time_total}' --max-time 15 -X GET "https://${API_HOST}${path}" \
-      -H "date: ${now}" -H "host: ${API_HOST}" \
+    curl -s -w '\nHTTPTIME:%{time_total}' --max-time 15 -X GET "https://${host}${path}" \
+      -H "date: ${now}" -H "host: ${host}" \
       -H "authorization: Signature version=\"1\",keyId=\"${key_id}\",algorithm=\"rsa-sha256\",headers=\"(request-target) date host\",signature=\"${signature}\"" 2>&1
   else
     local sha len
@@ -163,14 +163,50 @@ fi
 if [ "$USED" -eq 0 ]; then MODE="create"; else MODE="grow"; fi
 echo "[$SOURCE] mode=${MODE}"
 
+# --- Oracle Limits API: how many A1 OCPUs is this tenancy ACTUALLY allowed to
+# request per AD right now? Evidence (48h / 25k probes, 2026-07-06): every
+# single 3oc and 4oc create (9091 probes, 36% of all budget) got LimitExceeded
+# — zero ever reached the capacity check — and the Limits API confirmed why:
+# available=2 OCPU in all three ADs (free-tier A1 allowance here is 2, not 4).
+# So: ask Oracle directly at run start and never probe sizes above what it
+# reports. Auto-adaptive — if Oracle raises the limit, larger probes resume on
+# the next run automatically (and Mac fires a Telegram alert on any change).
+# On query failure availability stays -1 = unknown = no cap (fail open).
+LIMITS_HOST="limits.${OCI_REGION}.oci.oraclecloud.com"
+AVAIL_1=-1; AVAIL_2=-1; AVAIL_3=-1
+AVAIL_MIN=-1; AVAIL_MAX=-1
+for _ad in "${ADS[@]}"; do
+  _s="${_ad##*-}"
+  _adenc=$(printf '%s' "$_ad" | python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.stdin.read().strip()))')
+  _resp=$(sign_send get "/20190729/services/compute/limits/standard-a1-core-count/resourceAvailability?compartmentId=${OCI_TENANCY}&availabilityDomain=${_adenc}" "" "$LIMITS_HOST")
+  _av=$(printf '%s' "$_resp" | grep -o '"available":[0-9]*' | head -1 | cut -d: -f2)
+  if [ -n "$_av" ]; then
+    eval "AVAIL_${_s}=${_av}"
+    if [ "$AVAIL_MIN" -lt 0 ] || [ "$_av" -lt "$AVAIL_MIN" ]; then AVAIL_MIN=$_av; fi
+    if [ "$_av" -gt "$AVAIL_MAX" ]; then AVAIL_MAX=$_av; fi
+    echo "[$SOURCE] A1 availability AD-${_s}: ${_av} OCPU"
+  else
+    echo "[$SOURCE] A1 availability AD-${_s}: query failed (no cap applied)"
+  fi
+done
+
+# Mac-only: alert once when Oracle changes the allowance (limit raised = big news).
+if [ -n "$PACE_STATE_FILE" ] && [ "$AVAIL_MAX" -ge 0 ]; then
+  _prev=$(cat "$STATE_DIR/last-avail" 2>/dev/null)
+  if [ -n "$_prev" ] && [ "$_prev" != "$AVAIL_MAX" ]; then
+    tg "📊 Oracle изменил доступный лимит A1: было ${_prev} OCPU, стало ${AVAIL_MAX} OCPU. Хантер автоматически подстроил размеры проб."
+  fi
+  echo "$AVAIL_MAX" > "$STATE_DIR/last-avail" 2>/dev/null
+fi
+
 RUN_START=$(date +%s)
 END=$((RUN_START + DURATION))
 size=$TARGET_OCPU
 rate=0
 ad_i=0
 attempt=0
-min_seen=$size
-max_seen=$size
+min_seen=99   # updated to the actual probed size in-loop (not TARGET, which
+max_seen=0    # may never be probed once the Limits API caps us below it)
 # Response-class counters + probe-interval telemetry (user-requested visibility:
 # accepted-vs-rejected split, per-size attempt counts, worst blind gap).
 no_cap=0
@@ -247,26 +283,47 @@ pace_sleep() {
 # ~2 probes. In grow mode same idea relative to current size: alternate the
 # minimal next step (POC+1, most likely to fit) with the remaining larger sizes.
 pick_size() {
+  # Effective ceiling for THIS AD from the Limits API answer: never probe a
+  # size Oracle's own limits gate will reject (LimitExceeded), it can't succeed.
+  # Unknown availability (-1, query failed) => fail open to TARGET_OCPU.
+  # Floor 1: even if availability reads 0 keep the 1oc probe alive — the
+  # availability snapshot can lag reality and a 1oc probe is our cheapest canary.
+  local cap
+  cap=$(eval echo "\$AVAIL_${ad_short}")
+  if [ -z "$cap" ] || [ "$cap" -lt 0 ] 2>/dev/null; then cap=$TARGET_OCPU; fi
+  [ "$cap" -gt "$TARGET_OCPU" ] && cap=$TARGET_OCPU
+  [ "$cap" -lt 1 ] && cap=1
+
   if [ "$MODE" = "create" ]; then
     if [ $((attempt % 2)) -eq 1 ]; then
       size=1
     else
-      case $(( (attempt / 2) % 3 )) in
-        1) size=$TARGET_OCPU ;;
-        2) size=$((TARGET_OCPU - 1)) ;;
-        0) size=$((TARGET_OCPU - 2)) ;;
-      esac
+      # even attempts: cycle the larger viable sizes cap..2 (with cap=2 that's
+      # always 2 → sequence 1,2,1,2; with cap=4 it's 1,4,1,3,1,2 as before)
+      local span=$((cap - 1))
+      if [ "$span" -le 0 ]; then
+        size=1
+      else
+        size=$((cap - ( (attempt / 2) % span )))
+      fi
     fi
   else
+    # grow: ceiling is what we hold + what Oracle will still hand out
+    local ceil=$TARGET_OCPU
+    if [ "$AVAIL_MAX" -ge 0 ] 2>/dev/null; then
+      ceil=$((POC + AVAIL_MAX))
+      [ "$ceil" -gt "$TARGET_OCPU" ] && ceil=$TARGET_OCPU
+    fi
     local minv=$((POC + 1))
+    [ "$ceil" -lt "$minv" ] && ceil=$minv
     if [ $((attempt % 2)) -eq 1 ]; then
       size=$minv
     else
-      local span=$((TARGET_OCPU - minv))
+      local span=$((ceil - minv))
       if [ "$span" -le 0 ]; then
         size=$minv
       else
-        size=$((TARGET_OCPU - ( (attempt / 2) % span )))
+        size=$((ceil - ( (attempt / 2) % span )))
       fi
     fi
   fi
@@ -284,7 +341,9 @@ emit_stats() {
   local avg_req_ms=0 avg_cycle_s=0 cycle_n=$((attempt - 1))
   [ "$attempt" -gt 0 ] && avg_req_ms=$((sum_req_ms / attempt))
   [ "$cycle_n" -gt 0 ] && avg_cycle_s=$(awk -v s="$sum_cycle_s" -v n="$cycle_n" 'BEGIN{printf "%.1f", s/n}')
-  echo "STATS $(date -u +%s) {\"source\":\"${SOURCE}\",\"ad\":\"${ad_short:-n/a}\",\"attempts\":${attempt},\"min_size\":${min_seen},\"max_size\":${max_seen},\"rate_limits\":${rate},\"elapsed\":${elapsed},\"pace\":${PACE},\"no_cap\":${no_cap},\"other\":${other_cnt},\"limit\":${limit_cnt},\"auth\":${auth_cnt},\"s1\":${sc1},\"s2\":${sc2},\"s3\":${sc3},\"s4\":${sc4},\"max_gap\":${max_gap},\"avg_req_ms\":${avg_req_ms},\"avg_cycle_s\":${avg_cycle_s}}"
+  # Guard the "no probes this run" edge so the 99/0 sentinels never leak.
+  [ "$max_seen" -eq 0 ] && { min_seen=0; max_seen=0; }
+  echo "STATS $(date -u +%s) {\"source\":\"${SOURCE}\",\"ad\":\"${ad_short:-n/a}\",\"attempts\":${attempt},\"min_size\":${min_seen},\"max_size\":${max_seen},\"rate_limits\":${rate},\"elapsed\":${elapsed},\"pace\":${PACE},\"no_cap\":${no_cap},\"other\":${other_cnt},\"limit\":${limit_cnt},\"auth\":${auth_cnt},\"s1\":${sc1},\"s2\":${sc2},\"s3\":${sc3},\"s4\":${sc4},\"max_gap\":${max_gap},\"avg_req_ms\":${avg_req_ms},\"avg_cycle_s\":${avg_cycle_s},\"avail\":${AVAIL_MAX:--1}}"
 }
 
 while [ $(date +%s) -lt $END ]; do
