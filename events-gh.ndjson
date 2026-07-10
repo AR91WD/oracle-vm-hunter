@@ -65640,3 +65640,12 @@
 {"ts":1783662371,"src_run":29072010947,"source":"GH","ad":"2","size":1,"class":"no_cap","req_ms":1748,"http":500,"cost":"dns=72,tcp=145,tls=298,think=1231,body=0","pace":20}
 {"ts":1783662390,"src_run":29072010947,"source":"GH","ad":"2","size":2,"class":"no_cap","req_ms":1746,"http":500,"cost":"dns=273,tcp=145,tls=304,think=1022,body=0","pace":18}
 {"ts":1783662412,"src_run":29072010947,"source":"GH","ad":"2","size":1,"class":"no_cap","req_ms":1434,"http":500,"cost":"dns=3,tcp=145,tls=298,think=986,body=0","pace":18}
+{"ts":1783662483,"src_run":29072203296,"source":"GH","ad":"1","size":1,"class":"no_cap","req_ms":1692,"http":500,"cost":"dns=80,tcp=149,tls=306,think=1156,body=0","pace":18}
+{"ts":1783662499,"src_run":29072203296,"source":"GH","ad":"1","size":2,"class":"no_cap","req_ms":1640,"http":500,"cost":"dns=3,tcp=147,tls=306,think=1183,body=0","pace":18}
+{"ts":1783662517,"src_run":29072203296,"source":"GH","ad":"1","size":1,"class":"limit","req_ms":1568,"http":400,"cost":"dns=85,tcp=168,tls=312,think=1002,body=0","pace":16}
+{"ts":1783662489,"src_run":29072203296,"source":"GH","ad":"2","size":1,"class":"no_cap","req_ms":1499,"http":500,"cost":"dns=53,tcp=149,tls=318,think=977,body=0","pace":18}
+{"ts":1783662506,"src_run":29072203296,"source":"GH","ad":"2","size":2,"class":"no_cap","req_ms":1690,"http":500,"cost":"dns=28,tcp=151,tls=316,think=1193,body=0","pace":18}
+{"ts":1783662521,"src_run":29072203296,"source":"GH","ad":"2","size":1,"class":"limit","req_ms":1365,"http":400,"cost":"dns=81,tcp=148,tls=305,think=829,body=0","pace":16}
+{"ts":1783662494,"src_run":29072203296,"source":"GH","ad":"3","size":1,"class":"no_cap","req_ms":1712,"http":500,"cost":"dns=72,tcp=147,tls=306,think=1185,body=0","pace":18}
+{"ts":1783662513,"src_run":29072203296,"source":"GH","ad":"3","size":2,"class":"limit","req_ms":1309,"http":400,"cost":"dns=2,tcp=147,tls=309,think=850,body=0","pace":18}
+{"ts":1783662534,"src_run":29072203296,"source":"GH","ad":"3","size":1,"class":"limit","req_ms":1636,"http":400,"cost":"dns=87,tcp=147,tls=308,think=1093,body=0","pace":18}
