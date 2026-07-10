@@ -67887,3 +67887,14 @@
 {"ts":1783682843,"src_run":29089472556,"source":"GH","ad":"1","size":1,"class":"no_cap","req_ms":1481,"http":500,"cost":"dns=2,tcp=126,tls=267,think=1085,body=0","pace":18}
 {"ts":1783682860,"src_run":29089472556,"source":"GH","ad":"1","size":2,"class":"no_cap","req_ms":1238,"http":500,"cost":"dns=2,tcp=119,tls=254,think=861,body=0","pace":18}
 {"ts":1783682880,"src_run":29089472556,"source":"GH","ad":"1","size":1,"class":"limit","req_ms":1239,"http":400,"cost":"dns=2,tcp=105,tls=224,think=906,body=0","pace":16}
+{"ts":1783683130,"src_run":29089718327,"source":"GH","ad":"2","size":1,"class":"no_cap","req_ms":1163,"http":500,"cost":"dns=46,tcp=87,tls=182,think=846,body=0","pace":18}
+{"ts":1783683148,"src_run":29089718327,"source":"GH","ad":"2","size":2,"class":"429","req_ms":361,"http":429,"cost":"dns=2,tcp=88,tls=182,think=87,body=0","pace":18}
+{"ts":1783683178,"src_run":29089718327,"source":"GH","ad":"2","size":1,"class":"no_cap","req_ms":1490,"http":500,"cost":"dns=9,tcp=91,tls=191,think=1197,body=0","pace":27}
+{"ts":1783683208,"src_run":29089718327,"source":"GH","ad":"2","size":2,"class":"no_cap","req_ms":1598,"http":500,"cost":"dns=85,tcp=95,tls=220,think=1196,body=0","pace":27}
+{"ts":1783683237,"src_run":29089718327,"source":"GH","ad":"2","size":1,"class":"limit","req_ms":1183,"http":400,"cost":"dns=4,tcp=92,tls=196,think=891,body=0","pace":25}
+{"ts":1783683139,"src_run":29089718327,"source":"GH","ad":"3","size":1,"class":"no_cap","req_ms":1651,"http":500,"cost":"dns=194,tcp=164,tls=321,think=970,body=0","pace":18}
+{"ts":1783683155,"src_run":29089718327,"source":"GH","ad":"3","size":2,"class":"no_cap","req_ms":1734,"http":500,"cost":"dns=11,tcp=161,tls=340,think=1221,body=0","pace":18}
+{"ts":1783683176,"src_run":29089718327,"source":"GH","ad":"3","size":1,"class":"no_cap","req_ms":1478,"http":500,"cost":"dns=2,tcp=150,tls=316,think=1008,body=0","pace":16}
+{"ts":1783683193,"src_run":29089718327,"source":"GH","ad":"3","size":2,"class":"no_cap","req_ms":1473,"http":500,"cost":"dns=53,tcp=153,tls=307,think=959,body=0","pace":16}
+{"ts":1783683208,"src_run":29089718327,"source":"GH","ad":"3","size":1,"class":"limit","req_ms":1477,"http":400,"cost":"dns=67,tcp=150,tls=303,think=956,body=0","pace":14}
+{"ts":1783683127,"src_run":29089718327,"source":"GH","ad":"1","size":1,"class":"limit","req_ms":1601,"http":400,"cost":"dns=6,tcp=168,tls=343,think=1083,body=0","pace":18}
