@@ -19,9 +19,8 @@ jobs:
       fail-fast: false
       matrix:
         ad:
-          - "gukW:EU-FRANKFURT-1-AD-1"
-          - "gukW:EU-FRANKFURT-1-AD-2"
-          - "gukW:EU-FRANKFURT-1-AD-3"
+          - "af-johannesburg-1-AD-1"
+    
     steps:
       - uses: actions/checkout@v4
       - name: Progressive hunt on dedicated runner IP
