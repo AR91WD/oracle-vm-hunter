@@ -37,7 +37,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           AD: ${{ matrix.ad }}
           SUBNET: "ocid1.subnet.oc1.af-johannesburg-1.aaaaaaaaq7f3yoiishwzvepwsndvosc7piitpma7dhy3jkge6dnvlv3olqma"
-          BOOT_VOLUME_ID: "ocid1.bootvolume.oc1.af-johannesburg-1.abvg4ljrcetw3seii3lslblxxwisrynl236zhip6dhj5miuapwesrftcfsra"
+          IMAGE: "ocid1.bootvolume.oc1.af-johannesburg-1.abvg4ljrcetw3seii3lslblxxwisrynl236zhip6dhj5miuapwesrftcfsra"
           OCI_REGION: "af-johannesburg-1"
           TARGET_OCPU: "2"
           DURATION: "230"
